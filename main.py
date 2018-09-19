@@ -14,11 +14,11 @@ def parse_args():
     parser.add_argument('--num_perms', type=int, default=5, help='the number of tasks')
     parser.add_argument('--trials', type=int, default=50, help='the number of hyperparameter trials per task')
     parser.add_argument('--epochs', type=int, default=100, help='the number of training epochs per task')
-    parser.add_argument('--use_tpu', type=bool, default=False, help='whether to use tpu')
-    parser.add_argument('--tpu_name', type=str, default="", help='name of tpu in the project')
     parser.add_argument('--checkpoint_path', type=str, default='logs/checkpoints/', help='path to folder to store checkpoints')
     parser.add_argument('--summaries_path', type=str, default='logs/summaries/', help='path to folder to store summaries')
     parser.add_argument('--data_path', type=str, default='MNIST_data/', help='path to folder having data')
+    parser.add_argument('--use_tpu', type=bool, default=False, help='whether to use tpu')
+    parser.add_argument('--tpu_name', type=str, default="", help='name of tpu in the project')
     return parser.parse_args()
 
 

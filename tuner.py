@@ -6,6 +6,7 @@ from numpy.random import RandomState
 from queue import PriorityQueue
 from tensorflow.contrib.learn.python.learn.datasets.mnist import read_data_sets
 
+import sys
 
 PRNG = RandomState(12345)
 MINI_BATCH_SIZE = 250
@@ -18,6 +19,7 @@ class HyperparameterTuner(object):
         self.hidden_units = hidden_units
         self.num_perms = num_perms
         self.epochs = epochs
+        self.data_path = data_path
         self.task_list = self.create_permuted_mnist_task(num_perms)
         self.trial_learning_rates = [PRNG.uniform(1e-4, 1e-3) for _ in range(0, trials)]
         self.best_parameters = []
@@ -28,7 +30,6 @@ class HyperparameterTuner(object):
                                      apply_dropout=True,
                                      checkpoint_path=checkpoint_path,
                                      summaries_path=summaries_path)
-        self.data_path = data_path
 
     def search(self):
         for t in range(0, self.num_perms):
