@@ -13,7 +13,7 @@ LOG_FREQUENCY = 1000
 
 
 class HyperparameterTuner(object):
-    def __init__(self, sess, hidden_layers, hidden_units, num_perms, trials, epochs):
+    def __init__(self, sess, hidden_layers, hidden_units, num_perms, trials, epochs, checkpoint_path, summaries_path, data_path):
         self.hidden_layers = hidden_layers
         self.hidden_units = hidden_units
         self.num_perms = num_perms
@@ -25,7 +25,10 @@ class HyperparameterTuner(object):
         self.classifier = Classifier(num_class=10,
                                      num_features=784,
                                      fc_hidden_units=[hidden_units for _ in range(hidden_layers)],
-                                     apply_dropout=True)
+                                     apply_dropout=True,
+                                     checkpoint_path=checkpoint_path,
+                                     summaries_path=summaries_path)
+        self.data_path = data_path
 
     def search(self):
         for t in range(0, self.num_perms):
@@ -67,7 +70,7 @@ class HyperparameterTuner(object):
         queue.put((-accuracy, model_name))
 
     def create_permuted_mnist_task(self, num_datasets):
-        mnist = read_data_sets("MNIST_data/", one_hot=True)
+        mnist = read_data_sets(self.data_path, one_hot=True)
         task_list = [mnist]
         for seed in range(1, num_datasets):
             task_list.append(self.permute(mnist, seed))
