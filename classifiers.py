@@ -37,7 +37,7 @@ class Classifier(Network):
         return accuracy
 
     def minibatch_sgd(self, sess, i, dataset, mini_batch_size, log_frequency):
-        batch_xs, batch_ys = dataset.next_batch(mini_batch_size)
+        batch_xs, batch_ys = dataset.next_batch(sess, mini_batch_size)
         feed_dict = self.create_feed_dict(batch_xs, batch_ys)
         sess.run(self.train_step, feed_dict=feed_dict)
         if log_frequency and i % log_frequency is 0:
@@ -50,15 +50,19 @@ class Classifier(Network):
         self.writer.add_summary(summary, iteration)
 
     def update_fisher_full_batch(self, sess, dataset):
-        dataset._index_in_epoch = 0  # ensures that all training examples are included without repetitions
+        # dataset._index_in_epoch = 0  # ensures that all training examples are included without repetitions
+        dataset.initialize_iterator(self.ewc_batch_size)
+        num_iters = dataset.images.shape[0] // self.ewc_batch_size
         sess.run(self.fisher_zero_op)
-        for _ in range(0, self.ewc_batches):
+        for _ in range(0, num_iters):
             self.accumulate_fisher(sess, dataset)
+        scale = 1 / float(num_iters * self.ewc_batch_size)
+        self.fisher_full_batch_average_op = [tf.assign(var, scale * var) for var in self.fisher_diagonal]
         sess.run(self.fisher_full_batch_average_op)
         sess.run(self.update_theta_op)
 
     def accumulate_fisher(self, sess, dataset):
-        batch_xs, batch_ys = dataset.next_batch(self.ewc_batch_size)
+        batch_xs, batch_ys = dataset.next_batch(sess, self.ewc_batch_size)
         sess.run(self.fisher_accumulate_op, feed_dict={self.x_fisher: batch_xs, self.y_fisher: batch_ys})
 
     def prepare_for_training(self, sess, model_name, model_init_name, fisher_multiplier, learning_rate):
