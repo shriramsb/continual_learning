@@ -12,7 +12,7 @@ import tensorflow as tf
 
 PRNG = RandomState(12345)
 MINI_BATCH_SIZE = 250
-LOG_FREQUENCY = 1000
+LOG_FREQUENCY = 100
 
 class MyDataset(object):
     def __init__(self, images, labels):
@@ -33,7 +33,7 @@ class MyDataset(object):
         self.initialized = False
         self.dataset_temp = self.dataset.batch(self.batch_size)
         self.iterator = self.dataset_temp.make_initializable_iterator()
-        self.next_batch = self.iterator.get_next()
+        self.next_element = self.iterator.get_next()
 
     def next_batch(self, sess, batch_size):
         if (not self.initialized):
