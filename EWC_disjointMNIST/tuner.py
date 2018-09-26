@@ -56,7 +56,8 @@ class MyTask(object):
         self.test = MyDataset(task.test._images, task.test._labels)
 
 class HyperparameterTuner(object):
-    def __init__(self, sess, hidden_layers, hidden_units, num_perms, trials, epochs, checkpoint_path, summaries_path, data_path):
+    def __init__(self, sess, hidden_layers, hidden_units, num_perms, trials, epochs, checkpoint_path, summaries_path, data_path, 
+                dropout_keep_input=1.0, dropout_keep_hidden=1.0):
         self.hidden_layers = hidden_layers
         self.hidden_units = hidden_units
         self.num_perms = num_perms
@@ -71,7 +72,9 @@ class HyperparameterTuner(object):
                                      fc_hidden_units=[hidden_units for _ in range(hidden_layers)],
                                      apply_dropout=True,
                                      checkpoint_path=checkpoint_path,
-                                     summaries_path=summaries_path)
+                                     summaries_path=summaries_path,
+                                     dropout_keep_input=dropout_keep_input,
+                                     dropout_keep_hidden=dropout_keep_hidden)
 
     def search(self):
         for t in range(0, self.num_perms):

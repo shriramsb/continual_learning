@@ -7,7 +7,9 @@ from network import Network
 class Classifier(Network):
     """Supplies fully connected prediction model with training loop which absorbs minibatches and updates weights."""
 
-    def __init__(self, checkpoint_path='logs/checkpoints/', summaries_path='logs/summaries/', *args, **kwargs):
+    def __init__(self, checkpoint_path='logs/checkpoints/', summaries_path='logs/summaries/', 
+                dropout_keep_input=1.0, dropout_keep_hidden=1.0,
+                *args, **kwargs):
         super(Classifier, self).__init__(*args, **kwargs)
         self.checkpoint_path = checkpoint_path
         self. summaries_path = summaries_path
@@ -17,6 +19,8 @@ class Classifier(Network):
         self.train_step = None
         self.accuracy = None
         self.loss = None
+        self.dropout_keep_input = dropout_keep_input
+        self.dropout_keep_hidden = dropout_keep_hidden
 
         self.create_loss_and_accuracy()
 
@@ -38,11 +42,15 @@ class Classifier(Network):
 
     def minibatch_sgd(self, sess, i, dataset, mini_batch_size, log_frequency):
         batch_xs, batch_ys = dataset.next_batch(sess, mini_batch_size)
-        feed_dict = self.create_feed_dict(batch_xs, batch_ys, keep_input=1.0, keep_hidden=1.0)
+        feed_dict = self.create_feed_dict(batch_xs, batch_ys, keep_input=self.dropout_keep_input, keep_hidden=self.dropout_keep_hidden)
         _, loss, loss_with_penalty = sess.run([self.train_step, self.loss, self.loss_with_penalty], feed_dict=feed_dict)
         # if log_frequency and i % log_frequency is 0:
         #     self.evaluate(sess, i, feed_dict)
         return loss, loss_with_penalty
+
+    def set_dropout(self, dropout_keep_input, dropout_keep_hidden):
+        self.dropout_keep_input = dropout_keep_input
+        self.dropout_keep_hidden = dropout_keep_hidden
 
     def evaluate(self, sess, iteration, feed_dict):
         if self.apply_dropout:
