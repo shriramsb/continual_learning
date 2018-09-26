@@ -1,0 +1,26 @@
+lr = 0.00001, fm = 1e6, num_updates = 5000
+at 3700, 3800 iters, val acc close to 81, 82.
+at 3000 iters, val acc close to 91, 74
+
+lr = 1e-5, fm = 1e2, num_updates = 3000
+at 13, 92, 73
+at 15, 82, 82
+
+lr = 1e-5, fm = 1e1, num_updates = 3000
+1200, 91, 76
+1300, 87, 80
+
+
+without dropout:
+lr = 1e-5, fm = 1e1, num_updates = 3000
+900, 93, 78
+1000, 90, 83
+1100, 84, 85
+
+lr = 1e-5, fm = 1e2, num_updates = 3000
+1000, 94, 76
+1100, 90, 82
+1200, 85, 85
+
+lr = 5e-6, fm = 10 ** (19 / 20 + 4) num_updates >= 5000, use early stop condition of waiting till task2_acc > task1_acc and 5 non-improving updates
+91, 87
