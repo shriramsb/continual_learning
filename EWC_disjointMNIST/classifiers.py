@@ -38,16 +38,23 @@ class Classifier(Network):
 
     def minibatch_sgd(self, sess, i, dataset, mini_batch_size, log_frequency):
         batch_xs, batch_ys = dataset.next_batch(sess, mini_batch_size)
-        feed_dict = self.create_feed_dict(batch_xs, batch_ys)
-        sess.run(self.train_step, feed_dict=feed_dict)
-        if log_frequency and i % log_frequency is 0:
-            self.evaluate(sess, i, feed_dict)
+        feed_dict = self.create_feed_dict(batch_xs, batch_ys, keep_input=1.0, keep_hidden=1.0)
+        _, loss, loss_with_penalty = sess.run([self.train_step, self.loss, self.loss_with_penalty], feed_dict=feed_dict)
+        # if log_frequency and i % log_frequency is 0:
+        #     self.evaluate(sess, i, feed_dict)
+        return loss, loss_with_penalty
 
     def evaluate(self, sess, iteration, feed_dict):
         if self.apply_dropout:
             feed_dict.update({self.keep_prob_input: 1.0, self.keep_prob_hidden: 1.0})
         summary, accuracy = sess.run([self.merged, self.accuracy], feed_dict=feed_dict)
         self.writer.add_summary(summary, iteration)
+
+    def get_confusion_matrix(self, sess, feed_dict):
+        if self.apply_dropout:
+            feed_dict.update({self.keep_prob_input: 1.0, self.keep_prob_hidden: 1.0})
+        cur_scores, cur_y = sess.run([self.scores, self.y], feed_dict=feed_dict)
+        return cur_scores, cur_y
 
     def update_fisher_full_batch(self, sess, dataset):
         # dataset._index_in_epoch = 0  # ensures that all training examples are included without repetitions
@@ -89,6 +96,7 @@ class Classifier(Network):
             self.optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
             penalty = tf.add_n([tf.reduce_sum(tf.square(w1-w2)*f) for w1, w2, f
                                 in zip(self.theta, self.theta_lagged, self.fisher_diagonal)])
+            self.loss_with_penalty = self.loss + (fisher_multiplier / 2) * penalty
             return self.optimizer.minimize(self.loss + (fisher_multiplier / 2) * penalty, var_list=self.theta)
 
     def save_weights(self, time_step, sess, model_name):
