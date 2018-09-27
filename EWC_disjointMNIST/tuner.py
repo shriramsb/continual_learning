@@ -69,14 +69,37 @@ class HyperparameterTuner(object):
         self.trial_learning_rates = [PRNG.uniform(1e-4, 1e-3) for _ in range(0, trials)]
         self.best_parameters = []
         self.sess = sess
-        self.classifier = Classifier(num_class=10,
-                                     num_features=784,
+
+        self.softmax_weight_mask_values = None
+        self.softmax_bias_mask_values = None
+        
+        self.num_features = 784
+        self.num_class = 10
+        self.init_softmax_mask()
+
+        self.classifier = Classifier(num_class=self.num_class,
+                                     num_features=self.num_features,
                                      fc_hidden_units=[hidden_units for _ in range(hidden_layers)],
                                      apply_dropout=True,
                                      checkpoint_path=checkpoint_path,
                                      summaries_path=summaries_path,
                                      dropout_keep_input=dropout_keep_input,
-                                     dropout_keep_hidden=dropout_keep_hidden)
+                                     dropout_keep_hidden=dropout_keep_hidden,
+                                     split=self.split)
+
+    def init_softmax_mask(self):
+        sizes = [self.num_features] + [self.hidden_units for _ in range(self.hidden_layers)] + [self.num_class]
+        self.softmax_weight_mask_values = []
+        self.softmax_bias_mask_values = []
+        for i in range(self.num_split):
+            W_mask = np.zeros((sizes[-2], sizes[-1]))
+            b_mask = np.zeros((sizes[-1], ))
+            for j in range(len(self.split[i])):
+                W_mask[:, self.split[i][j]] = np.ones((sizes[-2], ))
+                b_mask[self.split[i][j]] = 1
+            self.softmax_weight_mask_values.append(W_mask)
+            self.softmax_bias_mask_values.append(b_mask)
+
 
     def search(self):
         for t in range(0, self.num_split):
@@ -113,7 +136,10 @@ class HyperparameterTuner(object):
                               mini_batch_size=MINI_BATCH_SIZE,
                               log_frequency=LOG_FREQUENCY,
                               fisher_multiplier=1.0/lr,
-                              learning_rate=lr)
+                              learning_rate=lr,
+                              softmax_weight_mask_value=self.softmax_weight_mask_values[t],
+                              softmax_bias_mask_value=self.softmax_bias_mask_values[t],
+                              only_softmax_train=True if t > 0 else False)
         accuracy = self.classifier.test(sess=self.sess,
                                         model_name=model_name,
                                         batch_xs=self.task_list[0].validation.images,
