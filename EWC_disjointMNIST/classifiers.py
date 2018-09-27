@@ -58,7 +58,7 @@ class Classifier(Network):
         summary, accuracy = sess.run([self.merged, self.accuracy], feed_dict=feed_dict)
         self.writer.add_summary(summary, iteration)
 
-    def get_confusion_matrix(self, sess, feed_dict):
+    def get_predictions(self, sess, feed_dict):
         if self.apply_dropout:
             feed_dict.update({self.keep_prob_input: 1.0, self.keep_prob_hidden: 1.0})
         cur_scores, cur_y = sess.run([self.scores, self.y], feed_dict=feed_dict)
