@@ -132,6 +132,7 @@ class Network(object):
             self.biases = self.bias_shaped_variables(name='biases_fc', c=0.1, trainable=True)
             self.weights = self.weight_shaped_variables(name='weights_fc', sigma=0.1, trainable=True)
             self.theta = self.biases + self.weights
+            self.softmax_theta = [self.weights[-1]] + [self.biases[-1]]
         with tf.name_scope('fc_variables_lagged'):
             self.biases_lagged = self.bias_shaped_variables(name='biases_fc_lagged', c=0.0, trainable=False)
             self.weights_lagged = self.weight_shaped_variables(name='weights_fc_lagged', c=0.0, trainable=False)
@@ -148,3 +149,6 @@ class Network(object):
         with tf.name_scope("fisher-inputs"):
             self.x_fisher = tf.placeholder(tf.float32, [self.ewc_batch_size, self.num_features])
             self.y_fisher = tf.placeholder(tf.float32, [self.ewc_batch_size, self.num_class])
+        with tf.name_scope("softmax-grad-mask"):
+            self.sotfmax_weight_mask = tf.placeholder_with_default(np.ones((self.sizes[-2], self.sizes[-1])), [self.sizes[-2], self.sizes[-1]])
+            self.softmax_bias_mask = tf.placeholder_with_default(np.ones((self.sizes[-1], )), [self.sizes[-1]])
