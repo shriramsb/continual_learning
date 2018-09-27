@@ -24,3 +24,5 @@ lr = 1e-5, fm = 1e2, num_updates = 3000
 
 lr = 5e-6, fm = 10 ** (19 / 20 + 4) num_updates >= 5000, use early stop condition of waiting till task2_acc > task1_acc and 5 non-improving updates
 91, 87
+loss with penalty: 0.950625, loss: 0.438365, val0 accuracy: 0.910477, val1 accuracy: 0.871826
+test acc. 87%
