@@ -1,3 +1,4 @@
+import numpy as np
 import tensorflow as tf
 
 
@@ -150,5 +151,5 @@ class Network(object):
             self.x_fisher = tf.placeholder(tf.float32, [self.ewc_batch_size, self.num_features])
             self.y_fisher = tf.placeholder(tf.float32, [self.ewc_batch_size, self.num_class])
         with tf.name_scope("softmax-grad-mask"):
-            self.sotfmax_weight_mask = tf.placeholder_with_default(np.ones((self.sizes[-2], self.sizes[-1])), [self.sizes[-2], self.sizes[-1]])
-            self.softmax_bias_mask = tf.placeholder_with_default(np.ones((self.sizes[-1], )), [self.sizes[-1]])
+            self.softmax_weight_mask = tf.cast(tf.placeholder_with_default(np.ones((self.sizes[-2], self.sizes[-1]), dtype=np.float32), [self.sizes[-2], self.sizes[-1]]), tf.float32)
+            self.softmax_bias_mask = tf.cast(tf.placeholder_with_default(np.ones((self.sizes[-1], ), dtype=np.float32), [self.sizes[-1]]), tf.float32)

@@ -1,4 +1,5 @@
 import os
+import numpy as np
 import tensorflow as tf
 
 from network import Network
@@ -26,14 +27,14 @@ class Classifier(Network):
         self.create_loss_and_accuracy()
 
     def train(self, sess, model_name, model_init_name, dataset, num_updates, mini_batch_size, fisher_multiplier,
-              sotfmax_weight_mask_value, softmax_bias_mask_value,
+              softmax_weight_mask_value, softmax_bias_mask_value,
               learning_rate, log_frequency=None, dataset_lagged=None, # pass previous dataset as convenience 
               only_softmax_train=False): 
         print('training ' + model_name + ' with weights initialized at ' + str(model_init_name))
         self.prepare_for_training(sess, model_name, model_init_name, fisher_multiplier, learning_rate, only_softmax_train)
         for i in range(num_updates):
             self.minibatch_sgd(sess, i, dataset, mini_batch_size, log_frequency, 
-                                sotfmax_weight_mask_value=sotfmax_weight_mask_value, softmax_bias_mask_value=softmax_bias_mask_value)
+                                softmax_weight_mask_value=softmax_weight_mask_value, softmax_bias_mask_value=softmax_bias_mask_value)
         self.update_fisher_full_batch(sess, dataset)
         self.save_weights(i, sess, model_name)
         print('finished training ' + model_name)
@@ -44,10 +45,10 @@ class Classifier(Network):
         accuracy = sess.run(self.accuracy, feed_dict=feed_dict)
         return accuracy
 
-    def minibatch_sgd(self, sess, i, dataset, mini_batch_size, log_frequency, sotfmax_weight_mask_value, softmax_bias_mask_value):
+    def minibatch_sgd(self, sess, i, dataset, mini_batch_size, log_frequency, softmax_weight_mask_value, softmax_bias_mask_value):
         batch_xs, batch_ys = dataset.next_batch(sess, mini_batch_size)
         feed_dict = self.create_feed_dict(batch_xs, batch_ys, keep_input=self.dropout_keep_input, keep_hidden=self.dropout_keep_hidden, 
-                                        sotfmax_weight_mask_value=sotfmax_weight_mask_value, softmax_bias_mask_value=softmax_bias_mask_value)
+                                        softmax_weight_mask_value=softmax_weight_mask_value, softmax_bias_mask_value=softmax_bias_mask_value)
         _, loss, loss_with_penalty = sess.run([self.train_step, self.loss, self.loss_with_penalty], feed_dict=feed_dict)
         # if log_frequency and i % log_frequency is 0:
         #     self.evaluate(sess, i, feed_dict)
@@ -113,13 +114,14 @@ class Classifier(Network):
             # return self.optimizer.minimize(self.loss + (fisher_multiplier / 2) * penalty, var_list=self.theta)
             if (only_softmax_train):
                 grad_var = self.optimizer.compute_gradients(self.loss + (fisher_multiplier / 2) * penalty, var_list=self.softmax_theta)
+                for i in range(len(grad_var)):
+                    if (grad_var[i][1] == self.weights[-1]):
+                        grad_var[i] = (grad_var[i][0] * self.softmax_weight_mask, grad_var[i][1])
+                    if (grad_var[i][1] == self.biases[-1]):
+                        grad_var[i] = (grad_var[i][0] * self.softmax_bias_mask, grad_var[i][1])
             else:
                 grad_var = self.optimizer.compute_gradients(self.loss + (fisher_multiplier / 2) * penalty, var_list=self.theta)
-            for i in range(len(grad_var)):
-                if (grad_var[i][1] == self.weights[-1]):
-                    grad_var[i] = (grad_var[i][0] * self.sotfmax_weight_mask, grad_var[i][1])
-                if (grad_var[i][1] == self.biases[-1]):
-                    grad_var[i] = (grad_var[i][0] * self.softmax_bias_mask, grad_var[i][1])
+
             return self.optimizer.apply_gradients(grad_var)
 
 
@@ -134,10 +136,14 @@ class Classifier(Network):
         ckpt = tf.train.get_checkpoint_state(checkpoint_dir=self.checkpoint_path, latest_filename=model_name)
         self.saver.restore(sess=sess, save_path=ckpt.model_checkpoint_path)
 
-    def create_feed_dict(self, batch_xs, batch_ys, sotfmax_weight_mask_value, softmax_bias_mask_value,
+    def create_feed_dict(self, batch_xs, batch_ys, 
+                        softmax_weight_mask_value=None, softmax_bias_mask_value=None,
                         keep_hidden=0.5, keep_input=0.8):
         feed_dict = {self.x: batch_xs, self.y: batch_ys}
         if self.apply_dropout:
-            feed_dict.update({self.keep_prob_hidden: keep_hidden, self.keep_prob_input: keep_input, 
-                            self.sotfmax_weight_mask: sotfmax_weight_mask_value, self.softmax_bias_mask: softmax_bias_mask_value})
+            if (softmax_weight_mask_value is not None):
+                feed_dict.update({self.keep_prob_hidden: keep_hidden, self.keep_prob_input: keep_input, 
+                                self.softmax_weight_mask: softmax_weight_mask_value, self.softmax_bias_mask: softmax_bias_mask_value})
+            else:
+                feed_dict.update({self.keep_prob_hidden: keep_hidden, self.keep_prob_input: keep_input})
         return feed_dict

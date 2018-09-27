@@ -95,10 +95,10 @@ class HyperparameterTuner(object):
             W_mask = np.zeros((sizes[-2], sizes[-1]))
             b_mask = np.zeros((sizes[-1], ))
             for j in range(len(self.split[i])):
-                W_mask[:, self.split[i][j]] = np.ones((sizes[-2], ))
-                b_mask[self.split[i][j]] = 1
-            self.softmax_weight_mask_values.append(W_mask)
-            self.softmax_bias_mask_values.append(b_mask)
+                W_mask[:, int(self.split[i][j])] = np.ones((sizes[-2], ))
+                b_mask[int(self.split[i][j])] = 1
+            self.softmax_weight_mask_values.append(W_mask.astype(np.float32))
+            self.softmax_bias_mask_values.append(b_mask.astype(np.float32))
 
 
     def search(self):
