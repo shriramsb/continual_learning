@@ -56,14 +56,16 @@ class MyTask(object):
         self.test = MyDataset(task.test._images, task.test._labels)
 
 class HyperparameterTuner(object):
-    def __init__(self, sess, hidden_layers, hidden_units, num_perms, trials, epochs, checkpoint_path, summaries_path, data_path, 
+    def __init__(self, sess, hidden_layers, hidden_units, trials, epochs, 
+                checkpoint_path, summaries_path, data_path, split_path,
                 dropout_keep_input=1.0, dropout_keep_hidden=1.0):
         self.hidden_layers = hidden_layers
         self.hidden_units = hidden_units
-        self.num_perms = num_perms
+        self.split = self.read_split(split_path)
+        self.num_split = len(self.split)
         self.epochs = epochs
         self.data_path = data_path
-        self.task_list = self.create_split_mnist_task(num_perms)
+        self.task_list = self.create_split_mnist_task()
         self.trial_learning_rates = [PRNG.uniform(1e-4, 1e-3) for _ in range(0, trials)]
         self.best_parameters = []
         self.sess = sess
@@ -77,7 +79,7 @@ class HyperparameterTuner(object):
                                      dropout_keep_hidden=dropout_keep_hidden)
 
     def search(self):
-        for t in range(0, self.num_perms):
+        for t in range(0, self.num_split):
             queue = PriorityQueue()
             for learning_rate in self.trial_learning_rates:
                 self.train_on_task(t, learning_rate, queue)
@@ -118,29 +120,42 @@ class HyperparameterTuner(object):
                                         batch_ys=self.task_list[0].validation.labels)
         queue.put((-accuracy, model_name))
 
-    def create_split_mnist_task(self, num_datasets):
+    def create_split_mnist_task(self):
         mnist = read_data_sets(self.data_path, one_hot=True)
         seed = 1
-        task_list = self.split_mnist(mnist, num_datasets, seed)
+        task_list = self.split_mnist(mnist, self.split, seed)
         return task_list
 
     @staticmethod
-    def split_mnist(mnist, num_datasets, seed):
+    def read_split(split_path):
+        split = []
+        try:
+            f = open(split_path)
+            while (True):
+                line = f.readline()
+                if (line == ""):
+                    break
+                split.append([float(i) for i in line.split()])
+        except IOError:
+            print("split path file not found")
+            exit(-1)
+        return split
+    
+    @staticmethod
+    def split_mnist(mnist, dataset_split, seed):
         np.random.seed(seed)
-        num_class = 10
-        task_size = num_class // num_datasets
         task_list = []
         train_labels = np.argmax(mnist.train.labels, axis=1)
         validation_labels = np.argmax(mnist.validation.labels, axis=1)
         test_labels = np.argmax(mnist.test.labels, axis=1)
-        for i in range(num_datasets):
+        for i in range(len(dataset_split)):
             cur_train_indices = [False] * mnist.train.images.shape[0]
             cur_validation_indices = [False] * mnist.validation.images.shape[0]
             cur_test_indices = [False] * mnist.test.images.shape[0]
-            for j in range(task_size):
-                cur_train_indices = np.logical_or(cur_train_indices, (train_labels == (i * task_size + j)))
-                cur_validation_indices = np.logical_or(cur_validation_indices, (validation_labels == (i * task_size + j)))
-                cur_test_indices = np.logical_or(cur_test_indices, (test_labels == (i * task_size + j)))
+            for j in range(len(dataset_split[i])):
+                cur_train_indices = np.logical_or(cur_train_indices, (train_labels == dataset_split[i][j]))
+                cur_validation_indices = np.logical_or(cur_validation_indices, (validation_labels == dataset_split[i][j]))
+                cur_test_indices = np.logical_or(cur_test_indices, (test_labels == dataset_split[i][j]))
 
             task = deepcopy(mnist)
             task.train._images = task.train._images[cur_train_indices]
