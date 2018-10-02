@@ -97,7 +97,7 @@ class HyperparameterTuner(object):
         print(accuracies)
 
     def train_on_task(self, t, lr, queue):
-        model_name = self.file_name(lr, t)
+        model_name = self.file_name(lr, 1.0 / lr, t)
         dataset_train = self.task_list[t].train
         dataset_lagged = self.task_list[t - 1].train if t > 0 else None
         model_init_name = self.best_parameters[t - 1][1] if t > 0 else None
@@ -186,7 +186,7 @@ class HyperparameterTuner(object):
         permuted.validation._images = permuted.validation._images[:, perm]
         return permuted
 
-    def file_name(self, lr, t):
+    def file_name(self, lr, fm, t):
         return 'layers=%d,hidden=%d,lr=%.5f,multiplier=%.2f,mbsize=%d,epochs=%d,perm=%d' \
-               % (self.hidden_layers, self.hidden_units, lr, 1 / lr, MINI_BATCH_SIZE, self.epochs, t)
+               % (self.hidden_layers, self.hidden_units, lr, fm, MINI_BATCH_SIZE, self.epochs, t)
 
