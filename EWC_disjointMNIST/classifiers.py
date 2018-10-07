@@ -221,10 +221,11 @@ class Classifier(object):
     def prepare_for_training(self, sess, model_name, model_init_name):
         # self.writer = tf.summary.FileWriter(self.summaries_path + model_name, sess.graph)
         # self.merged = tf.summary.merge_all()
-        self.train_step = self.create_train_step(self.fisher_multiplier if model_init_name else 0.0)
+        self.train_step = self.create_train_step(self.fisher_multiplier)
         init = tf.global_variables_initializer()
         sess.run(init)
         if model_init_name:
+            print("Restoring paramters from %s" % (model_init_name, ))
             self.restore_model(sess, model_init_name)
     
     def create_train_step(self, fisher_multiplier):

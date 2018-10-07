@@ -241,7 +241,8 @@ class HyperparameterTuner(object):
         hparams = default_hparams
         self.classifier.update_hparams(hparams)
         
-        model_name = self.file_name(hparams)
+        model_name = self.file_name(t, hparams)
+        print("Training with %s" % (model_name, ))
         model_init_name = self.best_hparams[t - 1][-1] if t > 0 else None
         self.classifier.prepare_for_training(sess=self.sess, 
                                             model_name=model_name, 
@@ -259,6 +260,9 @@ class HyperparameterTuner(object):
         dataset_val = self.task_list[t].validation
         dataset_train.initialize_iterator(batch_size)
         dataset_val.initialize_iterator(batch_size)
+
+        updates_per_epoch = dataset_train.images.shape[0] // batch_size
+        num_tolerate_epochs = 2
         while (True):
             batch_xs, batch_ys = dataset_train.next_batch(self.sess)
             feed_dict = self.classifier.create_feed_dict(batch_xs, batch_ys)
@@ -278,7 +282,7 @@ class HyperparameterTuner(object):
                     cur_iter_num_classes += len(self.split[j])
                 cur_iter_avg /= cur_iter_num_classes
 
-                if (cur_best_avg >= cur_iter_avg):
+                if (val_acc[-1][-1] == np.max(np.array(val_acc)[:, -1]) and cur_best_avg >= cur_iter_avg):
                     count_not_improving += 1
                 else:
                     count_not_improving = 0
@@ -287,7 +291,7 @@ class HyperparameterTuner(object):
                     cur_best_avg = cur_iter_avg
                     cur_best_avg_num_updates = i
 
-                if (count_not_improving >= self.count_not_improving_threshold):
+                if (count_not_improving * self.eval_frequency >= updates_per_epoch * num_tolerate_epochs):
                     if (num_updates == 0):
                         break
             
@@ -296,6 +300,10 @@ class HyperparameterTuner(object):
                 break
                 
             total_updates = i
+
+        print("epochs: %f, final train loss: %f, validation accuracies: %s" % (i / updates_per_epoch, loss[-1], str(np.array(val_acc)[:, -1])))
+        print("best epochs: %f, best_avg: %f, validation accuracies: %s" % 
+                (cur_best_avg_num_updates / updates_per_epoch, cur_best_avg, np.array(val_acc)[:, cur_best_avg_num_updates // self.eval_frequency]))
         return val_acc, val_loss, loss, loss_with_penalty, cur_best_avg, cur_best_avg_num_updates, total_updates
 
     def tune_on_task(self, t, batch_size, num_updates=0):
@@ -305,8 +313,8 @@ class HyperparameterTuner(object):
             cur_result = self.train(t, hparams, batch_size, num_updates=num_updates)
             self.classifier.update_fisher_full_batch(self.sess, self.task_list[t].train)
             val_acc, val_loss, loss, loss_with_penalty, cur_best_avg, cur_best_avg_num_updates, total_updates = cur_result
-            self.classifier.save_weights(total_updates, self.sess, self.file_name(hparams))
-            self.save_results(cur_result, self.file_name(hparams))
+            self.classifier.save_weights(total_updates, self.sess, self.file_name(t, hparams))
+            self.save_results(cur_result, self.file_name(t, hparams))
             hparams_tuple = tuple([v for k, v in sorted(hparams.items())])
             self.results_list[t][hparams_tuple] = {}
             self.results_list[t][hparams_tuple]['val_acc'] = val_acc
@@ -319,23 +327,47 @@ class HyperparameterTuner(object):
                 best_avg = cur_best_avg
                 best_hparams = hparams
         
-        self.best_hparams[t] = (best_hparams, self.file_name(best_hparams))
+        
+        if (self.best_hparams[t] is None):
+            self.best_hparams[t] = (best_hparams, self.file_name(t, best_hparams))
+        else:
+            prev_best_hparams_tuple = tuple([v for k, v in sorted(self.best_hparams[t][0].items())])
+            prev_best_avg = self.results_list[t][prev_best_hparams_tuple]['best_avg']
+            if (best_avg > prev_best_avg):
+                self.best_hparams[t] = (best_hparams, self.file_name(t, best_hparams))
+
         best_hparams_tuple = tuple([v for k, v in sorted(best_hparams.items())])
         cur_result = self.train(t, self.best_hparams[t][0], batch_size, 
                                 num_updates=self.results_list[t][best_hparams_tuple]['best_avg_updates'])
         self.classifier.update_fisher_full_batch(self.sess, self.task_list[t].train)
         val_acc, val_loss, loss, loss_with_penalty, cur_best_avg, cur_best_avg_num_updates, total_updates = cur_result
         self.classifier.save_weights(self.results_list[t][best_hparams_tuple]['best_avg_updates'], 
-                                        self.sess, self.file_name(best_hparams))
+                                        self.sess, self.file_name(t, best_hparams))
 
         return best_avg, best_hparams
 
-    def test(self, t, batch_size):
-        self.classifier.restore_model(sess, self.best_hparams[t][1])
+    def validation_accuracy(self, t, batch_size):
+        self.classifier.restore_model(self.sess, self.best_hparams[t][1])
         accuracy = [None for _ in range(t + 1)]
         for i in range(t + 1):
-            num_batches = self.task_list[t].test.images.shape[0] // batch_size
-            dataset = self.task_list[t].test
+            num_batches = self.task_list[i].validation.images.shape[0] // batch_size
+            dataset = self.task_list[i].validation
+            dataset.initialize_iterator(batch_size)
+            cur_accuracy = 0.0
+            for j in range(num_batches):
+                batch_xs, batch_ys = dataset.next_batch(self.sess)
+                feed_dict = self.classifier.create_feed_dict(batch_xs, batch_ys)
+                cur_accuracy += self.classifier.evaluate(self.sess, feed_dict)[1]
+            cur_accuracy /= num_batches
+            accuracy[i] = cur_accuracy
+        return accuracy
+
+    def test(self, t, batch_size):
+        self.classifier.restore_model(self.sess, self.best_hparams[t][1])
+        accuracy = [None for _ in range(t + 1)]
+        for i in range(t + 1):
+            num_batches = self.task_list[i].test.images.shape[0] // batch_size
+            dataset = self.task_list[i].test
             dataset.initialize_iterator(batch_size)
             cur_accuracy = 0.0
             for j in range(num_batches):
@@ -350,6 +382,10 @@ class HyperparameterTuner(object):
         with open(self.best_hparams_filepath, 'wb') as fp:
             pickle.dump(self.best_hparams, fp)
 
+    def load_best_hparams(self):
+        with open(self.best_hparams_filepath, 'rb') as fp:
+            self.best_hparams = pickle.load(fp)
+
     def save_results(self, result, file_name):
         with open(self.summaries_path + file_name, 'wb') as fp:
             pickle.dump(result, fp)
@@ -358,8 +394,13 @@ class HyperparameterTuner(object):
         with open(self.summaries_path + 'all_results', 'wb') as fp:
             pickle.dump(self.results_list, fp)
 
-    def file_name(self, hparams):
+    def load_results_list(self):
+        with open(self.summaries_path + 'all_results', 'rb') as fp:
+            self.results_list = pickle.load(fp)
+
+    def file_name(self, t, hparams):
         model_name = ''
         for k, v in sorted(hparams.items()):
             model_name += str(k) + '=' + str(v) + ','
+        model_name += 'task=' + str(t)
         return model_name

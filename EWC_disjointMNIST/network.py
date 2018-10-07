@@ -179,3 +179,6 @@ class Network(object):
         for i in range(len(self.layers)):
             l.extend(self.layers[i].variables)
         return l
+
+    def name(self):
+        return 'fc500_fc500_fc10'
