@@ -220,6 +220,7 @@ class HyperparameterTuner(object):
                                 'dropout_input_prob': 1.0, 'dropout_hidden_prob': 1.0}
         self.count_not_improving_threshold = 10
         self.eval_frequency = 100
+        self.print_every = 1000
         
         if not os.path.exists(self.checkpoint_path):
             os.makedirs(self.checkpoint_path)
@@ -234,7 +235,7 @@ class HyperparameterTuner(object):
 
         self.classifier = Classifier(network, input_shape, output_shape, checkpoint_path)
 
-    def train(self, t, hparams, batch_size, num_updates=0):
+    def train(self, t, hparams, batch_size, num_updates=0, verbose=False):
         # make sure all previous tasks have been trained
         default_hparams = deepcopy(self.default_hparams)
         default_hparams.update(hparams)
@@ -295,6 +296,9 @@ class HyperparameterTuner(object):
                     if (num_updates == 0):
                         break
             
+            if (i % self.print_every == 0):
+                print("validation accuracies: %s, loss: %f, loss with penalty: %f" % (str(np.array(val_acc)[:, -1]), loss[-1], loss_with_penalty[-1]))
+
             i += 1
             if (num_updates > 0 and (i >= num_updates)):
                 break
@@ -306,11 +310,11 @@ class HyperparameterTuner(object):
                 (cur_best_avg_num_updates / updates_per_epoch, cur_best_avg, np.array(val_acc)[:, cur_best_avg_num_updates // self.eval_frequency]))
         return val_acc, val_loss, loss, loss_with_penalty, cur_best_avg, cur_best_avg_num_updates, total_updates
 
-    def tune_on_task(self, t, batch_size, num_updates=0):
+    def tune_on_task(self, t, batch_size, num_updates=0, verbose=False):
         best_avg = 0.0
         best_hparams = None
         for hparams in self.hparams_list[t]:
-            cur_result = self.train(t, hparams, batch_size, num_updates=num_updates)
+            cur_result = self.train(t, hparams, batch_size, num_updates=num_updates, verbose=verbose)
             self.classifier.update_fisher_full_batch(self.sess, self.task_list[t].train)
             val_acc, val_loss, loss, loss_with_penalty, cur_best_avg, cur_best_avg_num_updates, total_updates = cur_result
             self.classifier.save_weights(total_updates, self.sess, self.file_name(t, hparams))
