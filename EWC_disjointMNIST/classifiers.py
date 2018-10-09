@@ -253,6 +253,12 @@ class Classifier(object):
         accuracy = sess.run([self.loss, self.accuracy], feed_dict=feed_dict)
         return accuracy
 
+    def get_predictions(self, sess, feed_dict):
+        if self.apply_dropout:
+            feed_dict.update({self.keep_prob_input: 1.0, self.keep_prob_hidden: 1.0})
+        scores, y = sess.run([self.scores, self.y], feed_dict=feed_dict)
+        return scores, y
+
     def single_train_step(self, sess, feed_dict):
         _, loss, loss_with_penalty = sess.run([self.train_step, self.loss, self.loss_with_penalty], feed_dict=feed_dict)
         return loss, loss_with_penalty
@@ -282,6 +288,11 @@ class Classifier(object):
             if (not isinstance(k, str)):
                 raise Exception('Panic! hyperparameter key not string')
             setattr(self, k, v)
+
+    def get_penultimate_output(self, sess, feed_dict):
+        penultimate_output = sess.run(self.network.layer_output[-2], feed_dict=feed_dict)
+        return penultimate_output
+
 
     # def train(self, sess, model_name, model_init_name, dataset, log_frequency=None, num_updates=0):
     #     print('training ' + model_name + ' with weights initialized at ' + str(model_init_name))

@@ -8,6 +8,7 @@ from tensorflow.contrib.learn.python.learn.datasets.mnist import read_data_sets
 
 import sys
 import os
+import time
 import pickle
 
 import tensorflow as tf
@@ -17,6 +18,7 @@ MINI_BATCH_SIZE = 250
 LOG_FREQUENCY = 100
 
 class MyDataset(object):
+    # todo: shuffle dataset
     def __init__(self, images, labels):
         self.images = images
         self.labels = labels
@@ -50,12 +52,20 @@ class MyDataset(object):
         
         return ret
 
+    def get_data(self, start, end):
+        return self.images[start: end, :], self.labels[start: end, :]
+
 
 class MyTask(object):
-    def __init__(self, task):
-        self.train = MyDataset(task.train._images, task.train._labels)
-        self.validation = MyDataset(task.validation._images, task.validation._labels)
-        self.test = MyDataset(task.test._images, task.test._labels)
+    def __init__(self, task, train_images=None, train_labels=None):
+        if train_images is None:
+            self.train = MyDataset(task.train._images, task.train._labels)
+            self.validation = MyDataset(task.validation._images, task.validation._labels)
+            self.test = MyDataset(task.test._images, task.test._labels)
+        else:
+            self.train = MyDataset(train_images, train_labels)
+            self.validation = MyDataset(task.validation.images, task.validation.labels)
+            self.test = MyDataset(task.test.images, task.test.labels)
 
 # class HyperparameterTuner(object):
 #     def __init__(self, sess, hidden_layers, hidden_units, trials, epochs, 
@@ -235,7 +245,11 @@ class HyperparameterTuner(object):
 
         self.classifier = Classifier(network, input_shape, output_shape, checkpoint_path)
 
-    def train(self, t, hparams, batch_size, num_updates=0, verbose=False):
+        self.save_penultimate_output = False
+        self.per_example_append = 0
+        self.appended_task_list = [None for _ in range(self.num_tasks)]
+
+    def train(self, t, hparams, batch_size, model_init_name, num_updates=0, verbose=False):
         # make sure all previous tasks have been trained
         default_hparams = deepcopy(self.default_hparams)
         default_hparams.update(hparams)
@@ -244,7 +258,6 @@ class HyperparameterTuner(object):
         
         model_name = self.file_name(t, hparams)
         print("Training with %s" % (model_name, ))
-        model_init_name = self.best_hparams[t - 1][-1] if t > 0 else None
         self.classifier.prepare_for_training(sess=self.sess, 
                                             model_name=model_name, 
                                             model_init_name=model_init_name)
@@ -257,7 +270,7 @@ class HyperparameterTuner(object):
         cur_best_avg_num_updates = -1
         i = 0
         count_not_improving = 0
-        dataset_train = self.task_list[t].train
+        dataset_train = self.appended_task_list[t].train
         dataset_val = self.task_list[t].validation
         dataset_train.initialize_iterator(batch_size)
         dataset_val.initialize_iterator(batch_size)
@@ -310,11 +323,53 @@ class HyperparameterTuner(object):
                 (cur_best_avg_num_updates / updates_per_epoch, cur_best_avg, np.array(val_acc)[:, cur_best_avg_num_updates // self.eval_frequency]))
         return val_acc, val_loss, loss, loss_with_penalty, cur_best_avg, cur_best_avg_num_updates, total_updates
 
-    def tune_on_task(self, t, batch_size, num_updates=0, verbose=False):
+    def get_appended_task(self, t, model_init_name, batch_size):
+        appended_task = None
+        with open(self.checkpoint_path + model_init_name + '_penultimate_output.txt', 'w') as f:
+            old_penultimate_output, old_taskid_offset = pickle.load(f)
+        
+        cur_penultimate_output, _ = self.get_penultimate_output(t, batch_size)
+
+        similarity = np.matmul(cur_penultimate_output, old_penultimate_output.T)
+        topk_similar = np.argsort(similarity, axis=-1)[:, -self.per_example_append: ]
+        train_task = self.task_list[t].train
+        appended_images_shape = tuple([train_task.images.shape[0] * (self.per_example_append + 1)] + list(train_task.images.shape)[1: ])
+        appended_labels_shape = tuple([train_task.labels.shape[0] * (self.per_example_append + 1)] + list(train_task.labels.shape)[1: ])
+        appended_images = np.empty(appended_images_shape)
+        appended_labels = np.empty(appended_labels_shape)
+
+        offset = 0
+        for i in range(train_task.images.shape[0]):
+            appended_images[offset] = train_task.images[i]
+            appended_labels[offset] = train_task.labels[i]
+            for j in range(self.per_example_append):
+                index = old_taskid_offset[topk_similar[i, j]]
+                appended_images[offset + j] = self.task_list[index[0]].train.images[index[1]]
+                appended_labels[offset + j] = self.task_list[index[0]].train.labels[index[1]]
+            offset += 1 + self.per_example_append
+        appended_task = MyTask(self.task_list[t], appended_images, appended_labels)    
+        
+        return appended_task
+
+
+    def tune_on_task(self, t, batch_size, model_init_name=None, num_updates=0, verbose=False):
         best_avg = 0.0
         best_hparams = None
+        if model_init_name is None:
+            model_init_name = self.best_hparams[t - 1][-1] if t > 0 else None
+        
+        # todo: retrieve model_init_name and append points from old dataset to current task and add it to self.appended_task_list
+        if (self.per_example_append > 0):
+            self.classifier.restore_model(self.sess, model_init_name)
+            if (t == 0):
+                self.appended_task_list[0] = self.task_list[0]
+            else:
+                self.appended_task_list[t] = self.get_appended_task(t, model_init_name, batch_size)
+        else:
+            self.appended_task_list[t] = self.task_list[t]
+            
         for hparams in self.hparams_list[t]:
-            cur_result = self.train(t, hparams, batch_size, num_updates=num_updates, verbose=verbose)
+            cur_result = self.train(t, hparams, batch_size, model_init_name, num_updates=num_updates, verbose=verbose)
             self.classifier.update_fisher_full_batch(self.sess, self.task_list[t].train)
             val_acc, val_loss, loss, loss_with_penalty, cur_best_avg, cur_best_avg_num_updates, total_updates = cur_result
             self.classifier.save_weights(total_updates, self.sess, self.file_name(t, hparams))
@@ -341,14 +396,72 @@ class HyperparameterTuner(object):
                 self.best_hparams[t] = (best_hparams, self.file_name(t, best_hparams))
 
         best_hparams_tuple = tuple([v for k, v in sorted(best_hparams.items())])
-        cur_result = self.train(t, self.best_hparams[t][0], batch_size, 
+        cur_result = self.train(t, self.best_hparams[t][0], batch_size, model_init_name,
                                 num_updates=self.results_list[t][best_hparams_tuple]['best_avg_updates'])
         self.classifier.update_fisher_full_batch(self.sess, self.task_list[t].train)
         val_acc, val_loss, loss, loss_with_penalty, cur_best_avg, cur_best_avg_num_updates, total_updates = cur_result
         self.classifier.save_weights(self.results_list[t][best_hparams_tuple]['best_avg_updates'], 
                                         self.sess, self.file_name(t, best_hparams))
 
+        # check: save penultimate output to a file associated to current model: doing this only for best model as it is the one mostly gonna be used for next task
+        if (self.save_penultimate_output):
+            print("calculating penultimate output...")
+            start_time = time.time()
+            penultimate_output, taskid_offset = self.get_all_penultimate_output(t, batch_size)
+            print("time taken: %f", time.time() - start_time)
+            print("saving penultimate output...")
+            with open(self.checkpoint_path + self.file_name(t, hparams) + '_penultimate_output.txt', 'w') as f:
+                pickle.dump((penultimate_output, taskid_offset), f)
+
         return best_avg, best_hparams
+
+    def get_all_penultimate_output(self, t, batch_size):
+        # check: for each dataset in self.task_list[0:t + 1], append to a single numpy array
+        total_elements = sum([task.train.images.shape[0] for task in self.task_list[0: t + 1]])
+        # assuming penultimate layer is output of fc layer
+        penultimate_output_size = int(self.classifier.network.layer_output[-2].shape[-1])
+        penultimate_output = np.empty(shape=(total_elements, penultimate_output_size))
+        taskid_offset = np.full((total_elements, 2), -1)
+        offset = 0
+        for i in range(t + 1):
+            cur_num_elements = self.task_list[i].train.images.shape[0]
+            cur_penultimate_output, cur_taskid_offset = self.get_penultimate_output(t, batch_size)
+            penultimate_output[offset: offset + cur_num_elements, :] = cur_penultimate_output
+            taskid_offset[offset: offset + cur_num_elements] = cur_taskid_offset
+            offset += cur_num_elements            
+        
+        return penultimate_output, taskid_offset
+    
+    def get_penultimate_output(self, t, batch_size):
+        num_elements = self.task_list[t].train.images.shape[0]
+        penultimate_output_size = int(self.classifier.network.layer_output[-2].shape[-1])
+        penultimate_output = np.empty(shape=(num_elements, penultimate_output_size))
+        taskid_offset = np.full((num_elements, 2), -1)
+        offset = 0
+
+        num_batches = self.task_list[t].train.shape[0] // batch_size
+        for j in range(num_batches):
+            batch_xs, batch_ys = self.task_list[t].train.get_data(j * batch_size, (j + 1) * batch_size)
+            feed_dict = self.classifier.create_feed_dict(batch_xs, batch_ys)
+            cur_penultimate_output = self.classifier.get_penultimate_output(self.sess, feed_dict)
+            penultimate_output[offset: offset + batch_size, :] = cur_penultimate_output
+            taskid_offset[offset: offset + batch_size, 0] = np.full((batch_size, ), t)
+            taskid_offset[offset: offset + batch_size, 1] = np.arange(j * batch_size, (j + 1) * batch_size)
+            offset += batch_size
+        if (self.task_list[t].train.shape[0] % batch_size != 0):
+            j += 1
+            num_remaining = self.task_list[t].train.shape[0] % batch_size
+            batch_xs, batch_ys = self.task_list[t].train.get_data(j * batch_size, j * batch_size + num_remaining)
+            feed_dict = self.classifier.create_feed_dict(batch_xs, batch_ys)
+            cur_penultimate_output = self.classifier.get_penultimate_output(self.sess, feed_dict)
+            penultimate_output[offset: offset + num_remaining, :] = cur_penultimate_output
+            taskid_offset[offset: offset + num_remaining, 0] = np.full((num_remaining, ), t)
+            taskid_offset[offset: offset + num_remaining, 1] = np.arange(j * batch_size, j * batch_size + num_remaining)
+            offset += num_remaining
+
+        return penultimate_output, taskid_offset
+
+
 
     def validation_accuracy(self, t, batch_size):
         self.classifier.restore_model(self.sess, self.best_hparams[t][1])
