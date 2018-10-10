@@ -153,7 +153,6 @@ import tensorflow as tf
 class Network(object):
     def __init__(self):
         self.layers = None
-        self.layer_output = None
         self.create_layers()
 
     def create_layers(self):
@@ -163,7 +162,7 @@ class Network(object):
         self.layers.append(tf.layers.Dense(units=10))
 
     def forward(self, x, apply_dropout, keep_prob_input=1.0, keep_prob_hidden=1.0):
-        self.layer_output = []
+        layer_output = []
         input_shape = np.prod(x.shape.as_list()[1:])
         x = tf.reshape(x, [-1, input_shape])
         if (apply_dropout):
@@ -173,10 +172,10 @@ class Network(object):
             y = self.layers[i](y)
             if (apply_dropout):
                 y = tf.nn.dropout(y, keep_prob_hidden)
-            self.layer_output.append(y)
+            layer_output.append(y)
         y = self.layers[-1](y)
-        self.layer_output.append(y)
-        return y
+        layer_output.append(y)
+        return y, layer_output
 
     def get_layer_variables(self):
         l = []

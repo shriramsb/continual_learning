@@ -146,7 +146,7 @@ class Classifier(object):
         self.dropout_hidden_prob = 1.0
 
         self.network = network
-        self.scores = self.network.forward(self.x, self.apply_dropout, self.keep_prob_input, self.keep_prob_hidden)
+        self.scores, self.layer_output = self.network.forward(self.x, self.apply_dropout, self.keep_prob_input, self.keep_prob_hidden)
 
         self.theta = None
         self.theta_lagged = None
@@ -206,7 +206,7 @@ class Classifier(object):
             self.new_fisher_diagonal.append(tf.Variable(tf.constant(0.0, shape=self.theta[i].shape), trainable=False))
             self.zero_new_fisher_diagonal.append(tf.assign(self.new_fisher_diagonal[i], tf.constant(0.0, shape=self.new_fisher_diagonal[i].shape)))     # just use .op here to avoid getting return value
 
-        scores = self.network.forward(self.x_fisher, apply_dropout=False)
+        scores, _ = self.network.forward(self.x_fisher, apply_dropout=False)
         unaggregated_nll = tf.reduce_sum(-1 * self.y_fisher * tf.nn.log_softmax(scores), axis=1)
         self.accumulate_squared_gradients = []
         for i in range(len(self.theta)):
@@ -290,7 +290,7 @@ class Classifier(object):
             setattr(self, k, v)
 
     def get_penultimate_output(self, sess, feed_dict):
-        penultimate_output = sess.run(self.network.layer_output[-2], feed_dict=feed_dict)
+        penultimate_output = sess.run(self.layer_output[-2], feed_dict=feed_dict)
         return penultimate_output
 
 

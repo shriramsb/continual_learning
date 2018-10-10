@@ -309,7 +309,7 @@ class HyperparameterTuner(object):
                     if (num_updates == 0):
                         break
             
-            if (i % self.print_every == 0):
+            if (verbose and (i % self.print_every == 0)):
                 print("validation accuracies: %s, loss: %f, loss with penalty: %f" % (str(np.array(val_acc)[:, -1]), loss[-1], loss_with_penalty[-1]))
 
             i += 1
@@ -325,7 +325,7 @@ class HyperparameterTuner(object):
 
     def get_appended_task(self, t, model_init_name, batch_size):
         appended_task = None
-        with open(self.checkpoint_path + model_init_name + '_penultimate_output.txt', 'w') as f:
+        with open(self.checkpoint_path + model_init_name + '_penultimate_output.txt', 'rb') as f:
             old_penultimate_output, old_taskid_offset = pickle.load(f)
         
         cur_penultimate_output, _ = self.get_penultimate_output(t, batch_size)
@@ -344,8 +344,8 @@ class HyperparameterTuner(object):
             appended_labels[offset] = train_task.labels[i]
             for j in range(self.per_example_append):
                 index = old_taskid_offset[topk_similar[i, j]]
-                appended_images[offset + j] = self.task_list[index[0]].train.images[index[1]]
-                appended_labels[offset + j] = self.task_list[index[0]].train.labels[index[1]]
+                appended_images[offset + j + 1] = self.task_list[index[0]].train.images[index[1]]
+                appended_labels[offset + j + 1] = self.task_list[index[0]].train.labels[index[1]]
             offset += 1 + self.per_example_append
         appended_task = MyTask(self.task_list[t], appended_images, appended_labels)    
         
@@ -360,10 +360,10 @@ class HyperparameterTuner(object):
         
         # todo: retrieve model_init_name and append points from old dataset to current task and add it to self.appended_task_list
         if (self.per_example_append > 0):
-            self.classifier.restore_model(self.sess, model_init_name)
             if (t == 0):
                 self.appended_task_list[0] = self.task_list[0]
             else:
+                self.classifier.restore_model(self.sess, model_init_name)
                 self.appended_task_list[t] = self.get_appended_task(t, model_init_name, batch_size)
         else:
             self.appended_task_list[t] = self.task_list[t]
@@ -410,7 +410,7 @@ class HyperparameterTuner(object):
             penultimate_output, taskid_offset = self.get_all_penultimate_output(t, batch_size)
             print("time taken: %f", time.time() - start_time)
             print("saving penultimate output...")
-            with open(self.checkpoint_path + self.file_name(t, hparams) + '_penultimate_output.txt', 'w') as f:
+            with open(self.checkpoint_path + self.file_name(t, hparams) + '_penultimate_output.txt', 'wb') as f:
                 pickle.dump((penultimate_output, taskid_offset), f)
 
         return best_avg, best_hparams
@@ -419,13 +419,13 @@ class HyperparameterTuner(object):
         # check: for each dataset in self.task_list[0:t + 1], append to a single numpy array
         total_elements = sum([task.train.images.shape[0] for task in self.task_list[0: t + 1]])
         # assuming penultimate layer is output of fc layer
-        penultimate_output_size = int(self.classifier.network.layer_output[-2].shape[-1])
+        penultimate_output_size = int(self.classifier.layer_output[-2].shape[-1])
         penultimate_output = np.empty(shape=(total_elements, penultimate_output_size))
         taskid_offset = np.full((total_elements, 2), -1)
         offset = 0
         for i in range(t + 1):
             cur_num_elements = self.task_list[i].train.images.shape[0]
-            cur_penultimate_output, cur_taskid_offset = self.get_penultimate_output(t, batch_size)
+            cur_penultimate_output, cur_taskid_offset = self.get_penultimate_output(i, batch_size)
             penultimate_output[offset: offset + cur_num_elements, :] = cur_penultimate_output
             taskid_offset[offset: offset + cur_num_elements] = cur_taskid_offset
             offset += cur_num_elements            
@@ -434,12 +434,12 @@ class HyperparameterTuner(object):
     
     def get_penultimate_output(self, t, batch_size):
         num_elements = self.task_list[t].train.images.shape[0]
-        penultimate_output_size = int(self.classifier.network.layer_output[-2].shape[-1])
+        penultimate_output_size = int(self.classifier.layer_output[-2].shape[-1])
         penultimate_output = np.empty(shape=(num_elements, penultimate_output_size))
         taskid_offset = np.full((num_elements, 2), -1)
         offset = 0
 
-        num_batches = self.task_list[t].train.shape[0] // batch_size
+        num_batches = self.task_list[t].train.images.shape[0] // batch_size
         for j in range(num_batches):
             batch_xs, batch_ys = self.task_list[t].train.get_data(j * batch_size, (j + 1) * batch_size)
             feed_dict = self.classifier.create_feed_dict(batch_xs, batch_ys)
@@ -448,9 +448,9 @@ class HyperparameterTuner(object):
             taskid_offset[offset: offset + batch_size, 0] = np.full((batch_size, ), t)
             taskid_offset[offset: offset + batch_size, 1] = np.arange(j * batch_size, (j + 1) * batch_size)
             offset += batch_size
-        if (self.task_list[t].train.shape[0] % batch_size != 0):
+        if (self.task_list[t].train.images.shape[0] % batch_size != 0):
             j += 1
-            num_remaining = self.task_list[t].train.shape[0] % batch_size
+            num_remaining = self.task_list[t].train.images.shape[0] % batch_size
             batch_xs, batch_ys = self.task_list[t].train.get_data(j * batch_size, j * batch_size + num_remaining)
             feed_dict = self.classifier.create_feed_dict(batch_xs, batch_ys)
             cur_penultimate_output = self.classifier.get_penultimate_output(self.sess, feed_dict)
