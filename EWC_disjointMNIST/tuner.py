@@ -352,7 +352,7 @@ class HyperparameterTuner(object):
         return appended_task
 
 
-    def tune_on_task(self, t, batch_size, model_init_name=None, num_updates=0, verbose=False):
+    def tune_on_task(self, t, batch_size, model_init_name=None, num_updates=0, verbose=False, save_weights=True):
         best_avg = 0.0
         best_hparams = None
         if model_init_name is None:
@@ -372,7 +372,8 @@ class HyperparameterTuner(object):
             cur_result = self.train(t, hparams, batch_size, model_init_name, num_updates=num_updates, verbose=verbose)
             self.classifier.update_fisher_full_batch(self.sess, self.task_list[t].train)
             val_acc, val_loss, loss, loss_with_penalty, cur_best_avg, cur_best_avg_num_updates, total_updates = cur_result
-            self.classifier.save_weights(total_updates, self.sess, self.file_name(t, hparams))
+            if (save_weights):
+                self.classifier.save_weights(total_updates, self.sess, self.file_name(t, hparams))
             self.save_results(cur_result, self.file_name(t, hparams))
             hparams_tuple = tuple([v for k, v in sorted(hparams.items())])
             self.results_list[t][hparams_tuple] = {}
@@ -396,7 +397,7 @@ class HyperparameterTuner(object):
                 self.best_hparams[t] = (best_hparams, self.file_name(t, best_hparams))
 
         best_hparams_tuple = tuple([v for k, v in sorted(best_hparams.items())])
-        cur_result = self.train(t, self.best_hparams[t][0], batch_size, model_init_name,
+        cur_result = self.train(t, best_hparams, batch_size, model_init_name,
                                 num_updates=self.results_list[t][best_hparams_tuple]['best_avg_updates'])
         self.classifier.update_fisher_full_batch(self.sess, self.task_list[t].train)
         val_acc, val_loss, loss, loss_with_penalty, cur_best_avg, cur_best_avg_num_updates, total_updates = cur_result
@@ -410,7 +411,7 @@ class HyperparameterTuner(object):
             penultimate_output, taskid_offset = self.get_all_penultimate_output(t, batch_size)
             print("time taken: %f", time.time() - start_time)
             print("saving penultimate output...")
-            with open(self.checkpoint_path + self.file_name(t, hparams) + '_penultimate_output.txt', 'wb') as f:
+            with open(self.checkpoint_path + self.file_name(t, best_hparams) + '_penultimate_output.txt', 'wb') as f:
                 pickle.dump((penultimate_output, taskid_offset), f)
 
         return best_avg, best_hparams
