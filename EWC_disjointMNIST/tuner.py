@@ -331,6 +331,9 @@ class HyperparameterTuner(object):
         cur_penultimate_output, _ = self.get_penultimate_output(t, batch_size)
 
         similarity = np.matmul(cur_penultimate_output, old_penultimate_output.T)
+        cur_penultimate_output_norm = np.sqrt(np.sum((cur_penultimate_output ** 2), axis=1))
+        old_penultimate_output_norm = np.sqrt(np.sum((old_penultimate_output ** 2), axis=1))
+        similarity = similarity / old_penultimate_output_norm / np.expand_dims(cur_penultimate_output_norm, axis=1)
         topk_similar = np.argsort(similarity, axis=-1)[:, -self.per_example_append: ]
         train_task = self.task_list[t].train
         appended_images_shape = tuple([train_task.images.shape[0] * (self.per_example_append + 1)] + list(train_task.images.shape)[1: ])
@@ -495,6 +498,32 @@ class HyperparameterTuner(object):
             cur_accuracy /= num_batches
             accuracy[i] = cur_accuracy
         return accuracy
+
+    def test_split(self, t, batch_size, split):
+        self.classifier.restore_model(self.sess, self.best_hparams[t][1])
+        accuracy = np.array([0 for _ in range(len(split))])
+        elements_per_split = np.array([0 for _ in range(len(split))])
+        for i in range(t + 1):
+            num_batches = self.task_list[i].test.images.shape[0] // batch_size
+            dataset = self.task_list[i].test
+            dataset.initialize_iterator(batch_size)
+            for j in range(num_batches):
+                batch_xs, batch_ys = dataset.next_batch(self.sess)
+                feed_dict = self.classifier.create_feed_dict(batch_xs, batch_ys)
+                scores, y = self.classifier.get_predictions(self.sess, feed_dict)
+                y_pred = np.argmax(scores, axis=1)
+                y_true = np.argmax(y, axis=1)
+                for k in range(len(split)):
+                    y_split_index = np.isin(y_true, split[k])
+                    y_pred_temp = y_pred[y_split_index]
+                    y_true_temp = y_true[y_split_index]
+                    accuracy[k] += np.sum(y_true_temp == y_pred_temp)
+                    elements_per_split[k] += y_temp.shape[0]
+
+        accuracy = accuracy / elements_per_split
+        return list(accuracy)
+
+
 
     def save_best_hparams(self):
         with open(self.best_hparams_filepath, 'wb') as fp:
