@@ -7,7 +7,7 @@ from tensorflow.contrib import tpu
 from tensorflow.contrib.cluster_resolver import TPUClusterResolver
 
 
-def parse_args():
+def parseArgs():
     parser = argparse.ArgumentParser()
     parser.add_argument('--hidden_layers', type=int, default=2, help='the number of hidden layers')
     parser.add_argument('--hidden_units', type=int, default=800, help='the number of units per hidden layer')
@@ -23,7 +23,7 @@ def parse_args():
 
 
 def main():
-    args = parse_args()
+    args = parseArgs()
     
     if (not args.use_tpu):
         with tf.Session() as sess:
