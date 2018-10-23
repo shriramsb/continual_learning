@@ -55,10 +55,10 @@ class MyDataset(object):
 
     def nextBatchSample(self, sess):
         total_examples = self.images.shape[0]
-        sampled_indices = np.random.choice(range(total_examples), p = self.weights)
+        sampled_indices = np.random.choice(range(total_examples), p = self.weights, size=self.batch_size)
         batch_xs = self.images[sampled_indices]
         batch_ys = self.labels[sampled_indices]
-        batch_weights = self.weights[sampled_indices]
+        batch_weights = 1.0 / self.weights[sampled_indices]
         return batch_xs, batch_ys, batch_weights
 
     def getData(self, start, end):
@@ -69,7 +69,7 @@ class MyTask(object):
     def __init__(self, task, train_images=None, train_labels=None, weights=None):        
         if train_images is None:
             if weights is None:
-                weights = np.array([1 for _ in range(task.images.shape[0])]) / task.images.shape[0]
+                weights = np.array([1 for _ in range(task.train.images.shape[0])]) / task.train.images.shape[0]
             self.train = MyDataset(task.train._images, task.train._labels, weights)
             self.validation = MyDataset(task.validation._images, task.validation._labels)
             self.test = MyDataset(task.test._images, task.test._labels)
@@ -172,7 +172,7 @@ class HyperparameterTuner(object):
                     cur_iter_num_classes += len(self.split[j])
                 cur_iter_avg /= cur_iter_num_classes
 
-                if (val_acc[-1][-1] == np.max(np.array(val_acc)[:, -1]) and cur_best_avg >= cur_iter_avg):
+                if (val_acc[-1][-1] > np.max(np.array(val_acc)[:, -1]) / 2 and cur_best_avg >= cur_iter_avg):
                     count_not_improving += 1
                 else:
                     count_not_improving = 0
@@ -216,7 +216,7 @@ class HyperparameterTuner(object):
         old_task_weights = np.sum(similarity, axis=0)
         old_task_weights = old_task_weights / np.sum(old_task_weights)
         old_task_weights = old_task_weights * self.per_example_append / (self.per_example_append + 1)
-        cur_task_weights = np.array([1.0 / self.per_example_append for _ in range(train_task.images.shape[0])])
+        cur_task_weights = np.array([1.0 / (self.per_example_append + 1) for _ in range(train_task.images.shape[0])]) / train_task.images.shape[0]
 
         appended_images_shape = tuple([train_task.images.shape[0] + old_penultimate_output.shape[0]] + list(train_task.images.shape)[1: ])
         appended_labels_shape = tuple([train_task.labels.shape[0] + old_penultimate_output.shape[0]] + list(train_task.labels.shape)[1: ])
@@ -229,11 +229,11 @@ class HyperparameterTuner(object):
         offset = 0
         for i in range(t + 1):
             appended_images[offset : offset + self.task_list[i].train.images.shape[0]] = self.task_list[i].train.images
-            appended_labels[offset : offset + self.task_list[i].train.labels.labels[0]] = self.task_list[i].train.labels
+            appended_labels[offset : offset + self.task_list[i].train.labels.shape[0]] = self.task_list[i].train.labels
             offset += self.task_list[i].train.images.shape[0]
         
         appended_weights[0 : old_task_weights.shape[0]] = old_task_weights
-        appended_weights[ old_task_weights : ] = cur_task_weights
+        appended_weights[ old_task_weights.shape[0] : ] = cur_task_weights
         
         appended_task = MyTask(self.task_list[t], train_images=appended_images, train_labels=appended_labels, weights=appended_weights)
         
