@@ -1,4 +1,5 @@
 import numpy as np
+import math
 
 from copy import deepcopy
 from classifiers import Classifier
@@ -16,39 +17,50 @@ import tensorflow as tf
 PRNG = RandomState(12345)
 MINI_BATCH_SIZE = 250
 LOG_FREQUENCY = 100
+VALIDATION_BATCH_SIZE = 1024
 
 class MyDataset(object):
     # todo: shuffle dataset
     def __init__(self, images, labels):
         self.images = images
         self.labels = labels
-        self.dataset = tf.data.Dataset.from_tensor_slices((images, labels))
+        # self.dataset = tf.data.Dataset.from_generator(self.makeGenerator(self.images, self.labels), (tf.float32, tf.float32))
+        # self.dataset = tf.data.Dataset.from_tensor_slices((self.images_tf, self.labels_tf))
         self.batch_size = 0
-        self.initialized = True
+        # self.initialized = True
+        self.pos = 0
+
+    def makeGenerator(self, images, labels):
+        def _generator():
+            for image, label in zip(images, labels):
+                yield image, label
+        return _generator
 
     def initializeIterator(self, batch_size):
-        self.initialized = False
+        # self.initialized = False
         self.batch_size = batch_size
-        self.dataset_temp = self.dataset.batch(batch_size)
-        self.iterator = self.dataset_temp.make_initializable_iterator()
-        self.next_element = self.iterator.get_next()
+        # self.dataset_temp = self.dataset.batch(batch_size)
+        # self.iterator = self.dataset_temp.make_initializable_iterator()
+        # self.next_element = self.iterator.get_next()
+        self.pos = 0
 
     def reinitializeIterator(self):
-        self.initialized = False
-        self.dataset_temp = self.dataset.batch(self.batch_size)
-        self.iterator = self.dataset_temp.make_initializable_iterator()
-        self.next_element = self.iterator.get_next()
+        # self.initialized = False
+        # self.dataset_temp = self.dataset.batch(self.batch_size)
+        # self.iterator = self.dataset_temp.make_initializable_iterator()
+        # self.next_element = self.iterator.get_next()
+        self.pos = 0
 
     def nextBatch(self, sess):
-        if (not self.initialized):
-            sess.run(self.iterator.initializer)
-            self.initialized = True
-
-        try:
-            ret = sess.run(self.next_element)
-        except tf.errors.OutOfRangeError:
-            sess.run(self.iterator.initializer)
-            ret = sess.run(self.next_element)
+        # if (not self.initialized):
+            # sess.run(self.iterator.initializer)
+            # self.initialized = True
+        if (self.pos + self.batch_size >= self.images.shape[0]):
+            ret = self.images[self.pos : ], self.labels[self.pos : ]
+            self.pos = 0
+        else:
+            ret = self.images[self.pos : self.pos + self.batch_size], self.labels[self.pos : self.pos + self.batch_size]
+            self.pos = self.pos + self.batch_size
         
         return ret
 
@@ -84,9 +96,10 @@ class HyperparameterTuner(object):
         # self.num_split = len(self.split)
         # self.task_list = self.create_split_mnist_task()
         self.split = None
+        self.num_tasks = None
+        self.task_weights = None
         self.task_list = None
-        self.split, self.task_list = readDatasets()
-        self.num_tasks = len(self.split)
+        self.split, self.num_tasks, self.task_weights, self.task_list = readDatasets()
         
         self.best_hparams = [None for _ in range(self.num_tasks)]
         self.results_list = [{} for _ in range(self.num_tasks)]
@@ -94,7 +107,7 @@ class HyperparameterTuner(object):
         self.default_hparams = {'learning_rate': 5e-6, 'fisher_multiplier': 0.0, 
                                 'dropout_input_prob': 1.0, 'dropout_hidden_prob': 1.0}
         self.count_not_improving_threshold = 10
-        self.eval_frequency = 100
+        self.eval_frequency = 1000
         self.print_every = 1000
         
         if not os.path.exists(self.checkpoint_path):
@@ -149,25 +162,23 @@ class HyperparameterTuner(object):
             loss.append(cur_loss)
             loss_with_penalty.append(cur_loss_with_penalty)
             if (i % self.eval_frequency == 0):
-                cur_iter_avg = 0.0
-                cur_iter_num_classes = 0 # actually doesn't depend on iterations
+                cur_iter_weighted_avg = 0.0
+                cur_iter_weights_sum = 0 # actually doesn't depend on iterations
+                accuracy = self.validationAccuracy(t, VALIDATION_BATCH_SIZE, restore_model=False, get_loss=True)
                 for j in range(t + 1):
-                    val_data = self.task_list[j].validation
-                    feed_dict = self.classifier.createFeedDict(val_data.images, val_data.labels)
-                    accuracy = self.classifier.evaluate(self.sess, feed_dict)
-                    val_loss[j].append(accuracy[0])
-                    val_acc[j].append(accuracy[1])
-                    cur_iter_avg += accuracy[1] * len(self.split[j]) # assuming all classes are equally likely
-                    cur_iter_num_classes += len(self.split[j])
-                cur_iter_avg /= cur_iter_num_classes
+                    val_loss[j].append(accuracy[0][j])
+                    val_acc[j].append(accuracy[1][j])
+                    cur_iter_weighted_avg += accuracy[1][j] * self.task_weights[j] # assuming all classes are equally likely
+                    cur_iter_weights_sum += self.task_weights[j]
+                cur_iter_weighted_avg /= cur_iter_weights_sum
 
-                if (val_acc[-1][-1] == np.max(np.array(val_acc)[:, -1]) and cur_best_avg >= cur_iter_avg):
+                if (val_acc[-1][-1] >= np.max(np.array(val_acc)[:, -1]) / 2 and cur_best_avg >= cur_iter_weighted_avg):
                     count_not_improving += 1
                 else:
                     count_not_improving = 0
 
-                if (cur_iter_avg > cur_best_avg):
-                    cur_best_avg = cur_iter_avg
+                if (cur_iter_weighted_avg > cur_best_avg):
+                    cur_best_avg = cur_iter_weighted_avg
                     cur_best_avg_num_updates = i
 
                 if (count_not_improving * self.eval_frequency >= updates_per_epoch * num_tolerate_epochs):
@@ -220,7 +231,7 @@ class HyperparameterTuner(object):
         return appended_task
 
 
-    def tuneOnTask(self, t, batch_size, model_init_name=None, num_updates=0, verbose=False, save_weights=True):
+    def tuneOnTask(self, t, batch_size, model_init_name=None, num_updates=0, verbose=False, save_weights=True, update_fisher=True):
         best_avg = 0.0
         best_hparams = None
         if model_init_name is None:
@@ -238,7 +249,8 @@ class HyperparameterTuner(object):
             
         for hparams in self.hparams_list[t]:
             cur_result = self.train(t, hparams, batch_size, model_init_name, num_updates=num_updates, verbose=verbose)
-            self.classifier.updateFisherFullBatch(self.sess, self.task_list[t].train)
+            if update_fisher:
+                self.classifier.updateFisherFullBatch(self.sess, self.task_list[t].train)
             val_acc, val_loss, loss, loss_with_penalty, cur_best_avg, cur_best_avg_num_updates, total_updates = cur_result
             if (save_weights):
                 self.classifier.saveWeights(total_updates, self.sess, self.fileName(t, hparams))
@@ -267,7 +279,8 @@ class HyperparameterTuner(object):
         best_hparams_tuple = tuple([v for k, v in sorted(best_hparams.items())])
         cur_result = self.train(t, best_hparams, batch_size, model_init_name,
                                 num_updates=self.results_list[t][best_hparams_tuple]['best_avg_updates'])
-        self.classifier.updateFisherFullBatch(self.sess, self.task_list[t].train)
+        if update_fisher:
+            self.classifier.updateFisherFullBatch(self.sess, self.task_list[t].train)
         val_acc, val_loss, loss, loss_with_penalty, cur_best_avg, cur_best_avg_num_updates, total_updates = cur_result
         self.classifier.saveWeights(self.results_list[t][best_hparams_tuple]['best_avg_updates'], 
                                         self.sess, self.fileName(t, best_hparams))
@@ -332,35 +345,46 @@ class HyperparameterTuner(object):
 
 
 
-    def validationAccuracy(self, t, batch_size):
-        self.classifier.restoreModel(self.sess, self.best_hparams[t][1])
+    def validationAccuracy(self, t, batch_size, restore_model=True, get_loss=False):
+        if restore_model:
+            self.classifier.restoreModel(self.sess, self.best_hparams[t][1])
         accuracy = [None for _ in range(t + 1)]
+        loss = [None for _ in range(t + 1)]
         for i in range(t + 1):
-            num_batches = self.task_list[i].validation.images.shape[0] // batch_size
+            num_batches = math.ceil(self.task_list[i].validation.images.shape[0] / batch_size)
             dataset = self.task_list[i].validation
             dataset.initializeIterator(batch_size)
             cur_accuracy = 0.0
+            cur_loss = 0.0
             for j in range(num_batches):
                 batch_xs, batch_ys = dataset.nextBatch(self.sess)
                 feed_dict = self.classifier.createFeedDict(batch_xs, batch_ys)
-                cur_accuracy += self.classifier.evaluate(self.sess, feed_dict)[1]
-            cur_accuracy /= num_batches
+                eval_result = self.classifier.evaluate(self.sess, feed_dict)
+                cur_accuracy += eval_result[1] * batch_xs.shape[0]
+                cur_loss += eval_result[0] * batch_xs.shape[0]
+            cur_accuracy /= self.task_list[i].validation.images.shape[0]
+            cur_loss /= self.task_list[i].validation.images.shape[0]
             accuracy[i] = cur_accuracy
-        return accuracy
+            loss[i] = cur_loss
+        if (get_loss):
+            return loss, accuracy
+        else:
+            return accuracy
 
-    def test(self, t, batch_size):
-        self.classifier.restoreModel(self.sess, self.best_hparams[t][1])
+    def test(self, t, batch_size, restore_model=True):
+        if restore_model:
+            self.classifier.restoreModel(self.sess, self.best_hparams[t][1])
         accuracy = [None for _ in range(t + 1)]
         for i in range(t + 1):
-            num_batches = self.task_list[i].test.images.shape[0] // batch_size
+            num_batches = math.ceil(self.task_list[i].test.images.shape[0] / batch_size)
             dataset = self.task_list[i].test
             dataset.initializeIterator(batch_size)
             cur_accuracy = 0.0
             for j in range(num_batches):
                 batch_xs, batch_ys = dataset.nextBatch(self.sess)
                 feed_dict = self.classifier.createFeedDict(batch_xs, batch_ys)
-                cur_accuracy += self.classifier.evaluate(self.sess, feed_dict)[1]
-            cur_accuracy /= num_batches
+                cur_accuracy += self.classifier.evaluate(self.sess, feed_dict)[1] * batch_xs.shape[0]
+            cur_accuracy /= self.task_list[i].test.images.shape[0]
             accuracy[i] = cur_accuracy
         return accuracy
 
