@@ -131,7 +131,6 @@ class HyperparameterTuner(object):
 		print("Training with %s" % (model_name, ))
 		# restore model from model_init_name and create train step
 		self.classifier.prepareForTraining(sess=self.sess, 
-											model_name=model_name, 
 											model_init_name=model_init_name)
 		
 		# variables to monitor training
@@ -149,7 +148,7 @@ class HyperparameterTuner(object):
 		dataset_train.initializeIterator(batch_size) 		# set batch_size and pointer to start of dataset
 		dataset_val.initializeIterator(batch_size)
 
-		updates_per_epoch = self.task_list[t].train.images.shape[0] // batch_size 	# number of train steps in an epoch
+		updates_per_epoch = math.ceil(self.task_list[t].train.images.shape[0] / batch_size) 	# number of train steps in an epoch
 		self.num_tolerate_epochs = 2 												# number of epochs to wait if average validation accuracy isn't improving
 		# training loop
 		while (True):
@@ -210,9 +209,9 @@ class HyperparameterTuner(object):
 		ret['val_loss'] = val_loss
 		ret['loss'] = loss
 		ret['loss_with_penalty'] = loss_with_penalty
-		ret['cur_best_avg'] = cur_best_avg
-		ret['cur_best_avg_num_updates'] = cur_best_avg_num_updates
-		ret['total_updates'] = total_updates
+		ret['best_avg'] = cur_best_avg
+		cur_best_avg_num_updates = math.ceil(cur_best_avg_num_updates / updates_per_epoch) * updates_per_epoch 	# making best number of updates a multiple of epoch
+		ret['best_avg_updates'] = cur_best_avg_num_updates
 		return ret
 
 	# append task with examples from previous tasks
@@ -283,7 +282,7 @@ class HyperparameterTuner(object):
 			cur_result = self.train(t, hparams, batch_size, model_init_name, num_updates=num_updates, verbose=verbose)
 			if update_fisher:
 				self.classifier.updateFisherFullBatch(self.sess, self.task_list[t].train)
-			cur_best_avg = cur_result['cur_best_avg']
+			cur_best_avg = cur_result['best_avg']
 			if (save_weights):
 				self.classifier.saveWeights(cur_result['total_updates'], self.sess, self.fileName(t, hparams, self.tuner_hparams))
 			self.saveResults(cur_result, self.fileName(t, hparams, self.tuner_hparams))
