@@ -117,8 +117,12 @@ class HyperparameterTuner(object):
 
 	def setPerExampleAppend(self, val):
 		self.tuner_hparams['per_example_append'] = val
+		if (val > 0):
+			self.save_penultimate_output = True
+		else:
+			self.save_penultimate_output = False
 
-	# train on a given task with given hparams - hparams ; make sure all previous tasks have been trained
+	# train on a given task with given hparams - hparams
 	def train(self, t, hparams, batch_size, model_init_name, num_updates=0, verbose=False):
 		# make sure hparams has all required hparams for classifier
 		default_hparams = deepcopy(self.default_hparams)
@@ -194,8 +198,8 @@ class HyperparameterTuner(object):
 				print("validation accuracies: %s, loss: %f, loss with penalty: %f" % (str(np.array(val_acc)[:, -1]), loss[-1], loss_with_penalty[-1]))
 
 			i += 1
-			# break if num_updates is specified
-			if (num_updates > 0 and (i >= num_updates)):
+			# break if num_updates is specified ; break at nearest epoch which requires updates >= num_updates
+			if (num_updates > 0 and (i >= math.ceil(num_updates / updates_per_epoch) * updates_per_epoch)):
 				break
 				
 			total_updates = i
@@ -210,8 +214,8 @@ class HyperparameterTuner(object):
 		ret['loss'] = loss
 		ret['loss_with_penalty'] = loss_with_penalty
 		ret['best_avg'] = cur_best_avg
-		cur_best_avg_num_updates = math.ceil(cur_best_avg_num_updates / updates_per_epoch) * updates_per_epoch 	# making best number of updates a multiple of epoch
 		ret['best_avg_updates'] = cur_best_avg_num_updates
+		ret['total_updates'] = total_updates
 		return ret
 
 	# append task with examples from previous tasks
@@ -259,7 +263,7 @@ class HyperparameterTuner(object):
 		hparams_tuple = hparams_tuple + [v for k, v in sorted(tuner_hparams.items())]
 		return tuple(hparams_tuple)
 
-	# Train on task 't' with hparams in self.hparams_list[t] and find the best one ; calls train() internally
+	# Train on task 't' with hparams in self.hparams_list[t] and find the best one ; calls train() internally ; ; make sure all previous tasks have been trained
 	def tuneOnTask(self, t, batch_size, model_init_name=None, num_updates=0, verbose=False, save_weights=True, update_fisher=True):
 		best_avg = 0.0							# best average validation accuracy and hparams corresponding to it from self.hparams_list[t]
 		best_hparams = None
@@ -322,6 +326,62 @@ class HyperparameterTuner(object):
 				pickle.dump((penultimate_output, taskid_offset), f)
 
 		return best_avg, best_hparams
+
+	# train on a range of tasks sequentially [start, end] with different hparams ; currently only positive num_updates allowed
+	def tuneTasksInRange(self, start, end, batch_size, num_hparams, num_updates=0, verbose=False, update_fisher=True):
+		if (num_updates <= 0):
+			print("bad num_updates argument.. stopping")
+			return 0, tuner.hparams_list[start][0]
+
+		best_avg = 0.0
+		best_hparams_index = -1
+
+		# for each hparam, train on tasks in [start, end]
+		for k in range(num_hparams):
+			# requires model to have been trained on task (start - 1) with same hparams
+			for i in range(start, end + 1):
+				model_init_name = None
+				if (i > 0):
+					model_init_name = self.fileName(i - 1, self.hparams_list[i - 1][k], self.tuner_hparams)
+				
+				per_example_append = self.tuner_hparams['per_example_append']
+				if (per_example_append > 0):
+					if i == 0:
+						self.appended_task_list[i] = self.task_list[i]
+					else:
+						self.classifier.restoreModel(self.sess, model_init_name)
+						self.appended_task_list[i] = self.getAppendedTask(i, model_init_name, batch_size)
+				else:
+					self.appended_task_list[i] = self.task_list[i]
+
+				hparams = self.hparams_list[i][k]
+				cur_result = self.train(i, hparams, batch_size, model_init_name, num_updates=num_updates, verbose=verbose)
+				if update_fisher:
+					self.classifier.updateFisherFullBatch(self.sess, self.task_list[i].train)
+				self.classifier.saveWeights(cur_result['total_updates'], self.sess, self.fileName(i, hparams, self.tuner_hparams))
+				self.saveResults(cur_result, self.fileName(i, hparams, self.tuner_hparams))
+				hparams_tuple = self.hparamsDictToTuple(hparams, self.tuner_hparams)
+				self.results_list[i][hparams_tuple] = cur_result
+				# average validation accuracy taken at the end of training for all tasks
+				cur_best_avg = np.sum(np.array(cur_result['val_acc'])[ : , -1] * self.task_weights[0 : i + 1]) / np.sum(self.task_weights[0 : i + 1])
+
+				if (self.save_penultimate_output):
+					print("calculating penultimate output...")
+					start_time = time.time()
+					penultimate_output, taskid_offset = self.getAllPenultimateOutput(i, batch_size)
+					print("time taken: %f", time.time() - start_time)
+					print("saving penultimate output...")
+					with open(self.checkpoint_path + self.fileName(i, hparams, self.tuner_hparams) + '_penultimate_output.txt', 'wb') as f:
+						pickle.dump((penultimate_output, taskid_offset), f)
+
+			if (cur_best_avg > best_avg):
+				best_avg = cur_best_avg
+				best_hparams_index = k
+
+		for i in range(end + 1):
+			self.best_hparams[i] = self.hparams_list[i][best_hparams_index]
+
+		return best_avg, best_hparams_index
 
 	# get penultimate output of all layers till 't' using current parameters of network
 	def getAllPenultimateOutput(self, t, batch_size):
