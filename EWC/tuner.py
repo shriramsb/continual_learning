@@ -88,7 +88,7 @@ class HyperparameterTuner(object):
 		self.hparams_list = [[] for _ in range(self.num_tasks)] 						# list of hparams for each task to tune on
 		self.default_hparams = {'learning_rate': 5e-6, 'fisher_multiplier': 0.0,  		# default values of hparams
 								'dropout_input_prob': 1.0, 'dropout_hidden_prob': 1.0}
-		self.num_tolerate_epochs = 2 							# number of epochs to wait if validation accuracy isn't improving 										
+		self.num_tolerate_epochs = 2 							# number of epochs to wait if validation accuracy isn't improving
 		self.eval_frequency = 1000 								# frequency of calculation of validation accuracy
 		self.print_every = 1000 								# frequency of printing, if verbose during training
 		
@@ -109,7 +109,7 @@ class HyperparameterTuner(object):
 		self.classifier = Classifier(network, input_shape, output_shape, checkpoint_path)
 
 		self.save_penultimate_output = False 							# specifies whether to save penultimate output after training on a task
-		# number of examples from all old tasks to append to current task, just before starting to train on it, to avoid forgetting of old tasks
+		# number of examples from all old tasks to append to current task (per example), just before starting to train on it, to avoid forgetting of old tasks
 		# task after appending with examples to train set from old tasks
 		self.tuner_hparams = {}
 		self.tuner_hparams['per_example_append'] = 0
@@ -173,7 +173,7 @@ class HyperparameterTuner(object):
 				for j in range(t + 1):
 					val_loss[j].append(accuracy[0][j])
 					val_acc[j].append(accuracy[1][j])
-					cur_iter_weighted_avg += accuracy[1][j] * self.task_weights[j] # assuming all classes are equally likely
+					cur_iter_weighted_avg += accuracy[1][j] * self.task_weights[j]
 					cur_iter_weights_sum += self.task_weights[j]
 				cur_iter_weighted_avg /= cur_iter_weights_sum
 
@@ -338,7 +338,7 @@ class HyperparameterTuner(object):
 
 		# for each hparam, train on tasks in [start, end]
 		for k in range(num_hparams):
-			# requires model to have been trained on task (start - 1) with same hparams
+			# requires model to have been trained on task (start - 1) with same hparams self.hparams_list[start - 1][k]
 			for i in range(start, end + 1):
 				model_init_name = None
 				if (i > 0):
@@ -362,6 +362,7 @@ class HyperparameterTuner(object):
 				self.saveResults(cur_result, self.fileName(i, hparams, self.tuner_hparams))
 				hparams_tuple = self.hparamsDictToTuple(hparams, self.tuner_hparams)
 				self.results_list[i][hparams_tuple] = cur_result
+				
 				# average validation accuracy taken at the end of training for all tasks
 				cur_best_avg = np.sum(np.array(cur_result['val_acc'])[ : , -1] * self.task_weights[0 : i + 1]) / np.sum(self.task_weights[0 : i + 1])
 
@@ -379,7 +380,7 @@ class HyperparameterTuner(object):
 				best_hparams_index = k
 
 		for i in range(end + 1):
-			self.best_hparams[i] = self.hparams_list[i][best_hparams_index]
+			self.best_hparams[i] = (self.hparams_list[i][best_hparams_index], self.tuner_hparams, self.fileName(self.hparams_list[i][best_hparams_index], self.tuner_hparams))
 
 		return best_avg, best_hparams_index
 
