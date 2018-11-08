@@ -72,18 +72,25 @@ class MyDataset(object):
 # Task having dataset for train, dev, test
 class MyTask(object):
 	def __init__(self, task, train_images=None, train_labels=None, weights=None):        
-		if train_images is None:
-			if weights is None:
-				weights = np.array([1 for _ in range(task.train.images.shape[0])]) / task.train.images.shape[0]
+		# MNIST dataset from tf loaded dataset
+		if (type(task) == tf.contrib.learn.datasets.base.Datasets):
+			weights = np.array([1 for _ in range(task.train._images.shape[0])]) / task.train._images.shape[0]
 			self.train = MyDataset(task.train._images, task.train._labels, weights)
 			self.validation = MyDataset(task.validation._images, task.validation._labels)
 			self.test = MyDataset(task.test._images, task.test._labels)
 		else:
-			if weights is None:
-				weights = np.array([1 for _ in range(train_images.shape[0])]) / train_images.shape[0]
-			self.train = MyDataset(train_images, train_labels, weights)
-			self.validation = MyDataset(task.validation.images, task.validation.labels)
-			self.test = MyDataset(task.test.images, task.test.labels)
+			if train_images is None:
+				if weights is None:
+					weights = np.array([1 for _ in range(task.train.images.shape[0])]) / task.train.images.shape[0]
+				self.train = MyDataset(task.train.images, task.train.labels, weights)
+				self.validation = MyDataset(task.validation.images, task.validation.labels)
+				self.test = MyDataset(task.test.images, task.test.labels)
+			else:
+				if weights is None:
+					weights = np.array([1 for _ in range(train_images.shape[0])]) / train_images.shape[0]
+				self.train = MyDataset(train_images, train_labels, weights)
+				self.validation = MyDataset(task.validation.images, task.validation.labels)
+				self.test = MyDataset(task.test.images, task.test.labels)
 
 # Helps in tuning hyperparameters of classifer (network) on different tasks
 class HyperparameterTuner(object):
@@ -139,7 +146,7 @@ class HyperparameterTuner(object):
 		self.tuner_hparams = {'old:new': 2}
 
 	# train on a given task with given hparams - hparams
-	def train(self, t, hparams, batch_size, model_init_name, num_updates=0, verbose=False):
+	def train(self, t, hparams, batch_size, model_init_name, num_updates=-1, verbose=False):
 		# make sure hparams has all required hparams for classifier
 		default_hparams = deepcopy(self.default_hparams)
 		default_hparams.update(hparams)
@@ -153,6 +160,7 @@ class HyperparameterTuner(object):
 		self.classifier.prepareForTraining(sess=self.sess, 
 											model_name=model_name, 
 											model_init_name=model_init_name)
+
 		
 		# variables to monitor training
 		val_acc = [[] for _ in range(t + 1)] 						# validation loss, accuracy for all tasks till current task
@@ -206,7 +214,7 @@ class HyperparameterTuner(object):
 
 				# stop training if validation accuracy not improving for self.num_tolerate_epochs epochs
 				if (count_not_improving * self.eval_frequency >= updates_per_epoch * self.num_tolerate_epochs):
-					if (num_updates == 0):
+					if (num_updates == -1):
 						break
 
 			# print stats if verbose
@@ -215,7 +223,7 @@ class HyperparameterTuner(object):
 
 			i += 1
 			# break if num_updates is specified ; break at nearest epoch which requires updates >= num_updates
-			if (num_updates > 0 and (i >= math.ceil(num_updates / updates_per_epoch) * updates_per_epoch)):
+			if (num_updates >= 0 and (i >= math.ceil(num_updates / updates_per_epoch) * updates_per_epoch)):
 				break
 				
 			total_updates = i
@@ -234,12 +242,14 @@ class HyperparameterTuner(object):
 		return ret
 
 	# append task with examples from previous tasks
-	def getAppendedTask(self, t, model_init_name, batch_size, optimize_space=False, equal_weights=False):
+	def getAppendedTask(self, t, model_init_name, batch_size, optimize_space=False, equal_weights=False, apply_log=False):
 		appended_task = None
 
 		# if equal_weights is True, then assign equal weights to all points till current task. 
 		# Otherwise, weigh each point of previous tasks by cosine similarity to current task's points
 		if (not equal_weights):
+
+			self.classifier.restoreModel(self.sess, model_init_name)
 			# load penultimate output of previous tasks' examples for model_init_name 
 			with open(self.checkpoint_path + model_init_name + '_penultimate_output.txt', 'rb') as f:
 				old_penultimate_output, old_taskid_offset = pickle.load(f)
@@ -266,11 +276,15 @@ class HyperparameterTuner(object):
 					else:
 						similarity[i] = np.matmul(cur_penultimate_output[i], old_penultimate_output.T)
 					similarity[i] = similarity[i] / old_penultimate_output_norm / cur_penultimate_output_norm[i]
+					if (apply_log):
+						similarity[i] = -np.log(similarity[i] + 1e-24)
 				if (self.use_gpu):
 					del b
 			else:
 				similarity = np.matmul(cur_penultimate_output, old_penultimate_output.T)
 				similarity = similarity / old_penultimate_output_norm / np.expand_dims(cur_penultimate_output_norm, axis=1)
+				if (apply_log):
+					similarity = -np.log(similarity + 1e-24)
 
 			train_task = self.task_list[t].train
 
@@ -331,11 +345,14 @@ class HyperparameterTuner(object):
 		return tuple(hparams_tuple)
 
 	# Train on task 't' with hparams in self.hparams_list[t] and find the best one ; calls train() internally ; ; make sure all previous tasks have been trained
-	def tuneOnTask(self, t, batch_size, model_init_name=None, num_updates=0, verbose=False, save_weights=True, equal_weights=False):
+	def tuneOnTask(self, t, batch_size, model_init_name=None, num_updates=-1, verbose=False, save_weights=True, restore_params=True, 
+					equal_weights=False, apply_log=False):
 		best_avg = 0.0 								# best average validation accuracy and hparams corresponding to it from self.hparams_list[t]
 		best_hparams = None
 		if model_init_name is None: 				# model with which to initialize weights
-			model_init_name = self.best_hparams[t - 1][-1] if t > 0 else None
+			if (restore_params):
+				model_init_name = self.best_hparams[t - 1][-1] if t > 0 else None
+			
 		
 		# calculate weights of examples of previous tasks and append examples to current tasks
 		old_new_ratio = self.tuner_hparams['old:new']
@@ -343,11 +360,14 @@ class HyperparameterTuner(object):
 			if (t == 0):
 				self.appended_task_list[0] = self.task_list[0]
 			else:
-				self.classifier.restoreModel(self.sess, model_init_name)
-				self.appended_task_list[t] = self.getAppendedTask(t, model_init_name, batch_size, optimize_space=True, equal_weights=equal_weights)
+				self.appended_task_list[t] = self.getAppendedTask(t, model_init_name, batch_size, optimize_space=True, equal_weights=equal_weights, 
+																	apply_log=apply_log)
 		else:
 			self.appended_task_list[t] = self.task_list[t]
-			
+		
+		if (not restore_params):
+			model_init_name = None
+
 		# loop through self.hparams_list[t], train with it and find the best one
 		for hparams in self.hparams_list[t]:
 			cur_result = self.train(t, hparams, batch_size, model_init_name, num_updates=num_updates, verbose=verbose)
@@ -386,7 +406,7 @@ class HyperparameterTuner(object):
 			penultimate_output, taskid_offset = self.getAllPenultimateOutput(t, batch_size)
 			print("time taken: %f", time.time() - start_time)
 			print("saving penultimate output...")
-			with open(self.checkpoint_path + self.fileName(t, best_hparams) + '_penultimate_output.txt', 'wb') as f:
+			with open(self.checkpoint_path + self.fileName(t, best_hparams, self.tuner_hparams) + '_penultimate_output.txt', 'wb') as f:
 				pickle.dump((penultimate_output, taskid_offset), f)
 
 		return best_avg, best_hparams
@@ -401,8 +421,9 @@ class HyperparameterTuner(object):
 
 	
 	# train on a range of tasks sequentially [start, end] with different hparams ; currently only positive num_updates allowed
-	def tuneTasksInRange(self, start, end, batch_size, num_hparams, num_updates=0, verbose=False, equal_weights=False):
-		if (num_updates <= 0):
+	def tuneTasksInRange(self, start, end, batch_size, num_hparams, num_updates=0, verbose=False, equal_weights=False, restore_params=True, 
+							apply_log=False):
+		if (num_updates < 0):
 			print("bad num_updates argument.. stopping")
 			return 0, tuner.hparams_list[t][0]
 
@@ -415,27 +436,36 @@ class HyperparameterTuner(object):
 			for i in range(start, end + 1):
 				model_init_name = None
 				if (i > 0):
-					model_init_name = self.fileName(i - 1, self.hparams_list[i - 1][k], self.tuner_hparams)
+					if (restore_params):
+						model_init_name = self.fileName(i - 1, self.hparams_list[i - 1][k], self.tuner_hparams)
 				
 				old_new_ratio = self.tuner_hparams['old:new']
 				if (old_new_ratio > 0):
 					if i == 0:
 						self.appended_task_list[i] = self.task_list[i]
 					else:
-						self.classifier.restoreModel(self.sess, model_init_name)
-						self.appended_task_list[i] = self.getAppendedTask(i, model_init_name, batch_size, optimize_space=True, equal_weights=equal_weights)
+						self.appended_task_list[i] = self.getAppendedTask(i, model_init_name, batch_size, optimize_space=True, equal_weights=equal_weights, 
+																			apply_log=apply_log)
 				else:
 					self.appended_task_list[i] = self.task_list[i]
 
+				if (not restore_params):
+					model_init_name = None
+
 				hparams = self.hparams_list[i][k]
 				cur_result = self.train(i, hparams, batch_size, model_init_name, num_updates=num_updates, verbose=verbose)
-				self.classifier.saveWeights(cur_result['total_updates'], self.sess, self.fileName(i, hparams, self.tuner_hparams))
+				# self.classifier.saveWeights(cur_result['total_updates'], self.sess, self.fileName(i, hparams, self.tuner_hparams))
+				
 				self.saveResults(cur_result, self.fileName(i, hparams, self.tuner_hparams))
 				hparams_tuple = self.hparamsDictToTuple(hparams, self.tuner_hparams)
 				self.results_list[i][hparams_tuple] = cur_result
 
-				# average validation accuracy taken at the end of training for all tasks
-				cur_best_avg = np.sum(np.array(cur_result['val_acc'])[ : , -1] * self.task_weights[0 : i + 1]) / np.sum(self.task_weights[0 : i + 1])
+				cur_result = self.train(i, hparams, batch_size, model_init_name,
+								num_updates=self.results_list[i][hparams_tuple]['best_avg_updates'])
+				self.classifier.saveWeights(self.results_list[i][hparams_tuple]['best_avg_updates'], 
+												self.sess, self.fileName(i, hparams, self.tuner_hparams))
+
+				cur_best_avg = self.results_list[i][hparams_tuple]['best_avg']
 
 				if (self.save_penultimate_output):
 					print("calculating penultimate output...")
@@ -451,7 +481,7 @@ class HyperparameterTuner(object):
 				best_hparams_index = k
 
 		for i in range(end + 1):
-			self.best_hparams[i] = (self.hparams_list[i][best_hparams_index], self.tuner_hparams, self.fileName(self.hparams_list[i][best_hparams_index], self.tuner_hparams))
+			self.best_hparams[i] = (self.hparams_list[i][best_hparams_index], self.tuner_hparams, self.fileName(i, self.hparams_list[i][best_hparams_index], self.tuner_hparams))
 
 		return best_avg, best_hparams_index
 
@@ -505,7 +535,7 @@ class HyperparameterTuner(object):
 	# validation loss, accuracy till task 't'
 	def validationAccuracy(self, t, batch_size, restore_model=True, get_loss=False):
 		if restore_model:
-			self.classifier.restoreModel(self.sess, self.best_hparams[t][1])
+			self.classifier.restoreModel(self.sess, self.best_hparams[t][-1])
 		accuracy = [None for _ in range(t + 1)]
 		loss = [None for _ in range(t + 1)]
 		for i in range(t + 1):
@@ -532,7 +562,7 @@ class HyperparameterTuner(object):
 	# test accuracy till task 't'
 	def test(self, t, batch_size, restore_model=True):
 		if restore_model:
-			self.classifier.restoreModel(self.sess, self.best_hparams[t][1])
+			self.classifier.restoreModel(self.sess, self.best_hparams[t][-1])
 		accuracy = [None for _ in range(t + 1)]
 		for i in range(t + 1):
 			num_batches = math.ceil(self.task_list[i].test.images.shape[0] / batch_size)

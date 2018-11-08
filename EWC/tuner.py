@@ -53,14 +53,20 @@ class MyDataset(object):
 # Task having dataset for train, dev, test
 class MyTask(object):
 	def __init__(self, task, train_images=None, train_labels=None):
-		if train_images is None:
+		# MNIST dataset from tf loaded dataset
+		if (type(task) == tf.contrib.learn.datasets.base.Datasets):
 			self.train = MyDataset(task.train._images, task.train._labels)
 			self.validation = MyDataset(task.validation._images, task.validation._labels)
 			self.test = MyDataset(task.test._images, task.test._labels)
 		else:
-			self.train = MyDataset(train_images, train_labels)
-			self.validation = MyDataset(task.validation.images, task.validation.labels)
-			self.test = MyDataset(task.test.images, task.test.labels)
+			if train_images is None:
+				self.train = MyDataset(task.train.images, task.train.labels)
+				self.validation = MyDataset(task.validation.images, task.validation.labels)
+				self.test = MyDataset(task.test.images, task.test.labels)
+			else:
+				self.train = MyDataset(train_images, train_labels)
+				self.validation = MyDataset(task.validation.images, task.validation.labels)
+				self.test = MyDataset(task.test.images, task.test.labels)
 
 
 # Helps in tuning hyperparameters of classifer (network) on different tasks
@@ -123,7 +129,7 @@ class HyperparameterTuner(object):
 			self.save_penultimate_output = False
 
 	# train on a given task with given hparams - hparams
-	def train(self, t, hparams, batch_size, model_init_name, num_updates=0, verbose=False):
+	def train(self, t, hparams, batch_size, model_init_name, num_updates=-1, verbose=False):
 		# make sure hparams has all required hparams for classifier
 		default_hparams = deepcopy(self.default_hparams)
 		default_hparams.update(hparams)
@@ -190,7 +196,7 @@ class HyperparameterTuner(object):
 
 				# stop training if validation accuracy not improving for self.num_tolerate_epochs epochs
 				if (count_not_improving * self.eval_frequency >= updates_per_epoch * self.num_tolerate_epochs):
-					if (num_updates == 0):
+					if (num_updates == -1):
 						break
 			
 			# print stats if verbose
@@ -199,7 +205,7 @@ class HyperparameterTuner(object):
 
 			i += 1
 			# break if num_updates is specified ; break at nearest epoch which requires updates >= num_updates
-			if (num_updates > 0 and (i >= math.ceil(num_updates / updates_per_epoch) * updates_per_epoch)):
+			if (num_updates >= 0 and (i >= math.ceil(num_updates / updates_per_epoch) * updates_per_epoch)):
 				break
 				
 			total_updates = i
@@ -264,7 +270,7 @@ class HyperparameterTuner(object):
 		return tuple(hparams_tuple)
 
 	# Train on task 't' with hparams in self.hparams_list[t] and find the best one ; calls train() internally ; ; make sure all previous tasks have been trained
-	def tuneOnTask(self, t, batch_size, model_init_name=None, num_updates=0, verbose=False, save_weights=True, update_fisher=True):
+	def tuneOnTask(self, t, batch_size, model_init_name=None, num_updates=-1, verbose=False, save_weights=True, update_fisher=True):
 		best_avg = 0.0							# best average validation accuracy and hparams corresponding to it from self.hparams_list[t]
 		best_hparams = None
 		if model_init_name is None:				# model with which to initialize weights
@@ -310,8 +316,7 @@ class HyperparameterTuner(object):
 		best_hparams_tuple = self.hparamsDictToTuple(best_hparams, self.tuner_hparams)
 		cur_result = self.train(t, best_hparams, batch_size, model_init_name,
 								num_updates=self.results_list[t][best_hparams_tuple]['best_avg_updates'])
-		if update_fisher:
-			self.classifier.updateFisherFullBatch(self.sess, self.task_list[t].train)
+		self.classifier.updateFisherFullBatch(self.sess, self.task_list[t].train)
 		self.classifier.saveWeights(self.results_list[t][best_hparams_tuple]['best_avg_updates'], 
 										self.sess, self.fileName(t, best_hparams, self.tuner_hparams))
 
@@ -329,7 +334,7 @@ class HyperparameterTuner(object):
 
 	# train on a range of tasks sequentially [start, end] with different hparams ; currently only positive num_updates allowed
 	def tuneTasksInRange(self, start, end, batch_size, num_hparams, num_updates=0, verbose=False, update_fisher=True):
-		if (num_updates <= 0):
+		if (num_updates < 0):
 			print("bad num_updates argument.. stopping")
 			return 0, tuner.hparams_list[start][0]
 
@@ -358,13 +363,18 @@ class HyperparameterTuner(object):
 				cur_result = self.train(i, hparams, batch_size, model_init_name, num_updates=num_updates, verbose=verbose)
 				if update_fisher:
 					self.classifier.updateFisherFullBatch(self.sess, self.task_list[i].train)
-				self.classifier.saveWeights(cur_result['total_updates'], self.sess, self.fileName(i, hparams, self.tuner_hparams))
 				self.saveResults(cur_result, self.fileName(i, hparams, self.tuner_hparams))
 				hparams_tuple = self.hparamsDictToTuple(hparams, self.tuner_hparams)
 				self.results_list[i][hparams_tuple] = cur_result
+
+				cur_result = self.train(i, hparams, batch_size, model_init_name,
+								num_updates=self.results_list[i][hparams_tuple]['best_avg_updates'])
+				self.classifier.updateFisherFullBatch(self.sess, self.task_list[i].train)
+				self.classifier.saveWeights(self.results_list[i][hparams_tuple]['best_avg_updates'], 
+												self.sess, self.fileName(i, hparams, self.tuner_hparams))
+				hparams_tuple = self.hparamsDictToTuple(hparams, self.tuner_hparams)
 				
-				# average validation accuracy taken at the end of training for all tasks
-				cur_best_avg = np.sum(np.array(cur_result['val_acc'])[ : , -1] * self.task_weights[0 : i + 1]) / np.sum(self.task_weights[0 : i + 1])
+				cur_best_avg = self.results_list[i][hparams_tuple]['best_avg']
 
 				if (self.save_penultimate_output):
 					print("calculating penultimate output...")

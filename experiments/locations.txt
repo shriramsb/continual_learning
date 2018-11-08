@@ -1,1 +1,83 @@
-Permuted MNIST:
+
+
+
+1. Train incrementally with uniform sampling of examples from all tasks till current one, while retaining the parameters at end of training.
+2. Train incrementally with uniform sampling of examples from all tasks till current one, without retaining the parameters at end of training.
+
+1 helps to find if importance sampling is able to train faster
+2 help to find if importance-sampling is helping able to maintain performance.
+
+split_MNIST_1:
+	LSH indexing not required
+	task0 : 0-7
+	task1 : 8
+	task2 : 9
+
+	network_struct : fc256_fc256_fc10
+
+	EWC - EWC/split_MNIST_1/network_struct/EWC/
+	pathint - pathint/split_MNIST_1/network_struct/pathint/
+	Dropout + importance-sampling : importance_reweighting/split_MNIST_1/network_struct/DIS/
+	Dropout + baseline1 : importance_reweighting/split_MNIST_1/network_struct/DB1/
+	Dropout + baseline2 : importance_reweighting/split_MNIST_1/network_struct/DB2/
+
+split_CIFAR-100_1:
+	LSH indexing not required
+	network_struct : 
+		n1 - Structure exactly as given in Continual Learning through Synaptic Intelligence Pg 9 Appendix - seminar_papers/(03)
+
+	task0 : 0-79
+	Further tasks are to learn each class incrementally
+	EWC - EWC/split_CIFAR-100_1/network_struct/EWC/
+	pathint - pathint/split_CIFAR-100_1/network_struct/pathint
+	Dropout + importance-sampling : importance_reweighting/split_CIFAR-100_1/network_struct/DIS/
+	Dropout + baseline1 : importance_reweighting/split_CIFAR-100_1/network_struct/DB1/
+	Dropout + baseline2 : importance_reweighting/split_CIFAR-100_1/network_struct/DB2/
+
+permuted_MNIST_1:
+	requires LSH indexing
+	network_struct : fc2000_fc2000_fc10
+
+	task : learn each permutation incrementally
+
+
+
+
+Permuted MNIST - 10 tasks:
+fc2048_fc2048_fc10
+
+Python files:
+Complete, EWC, EWC + append-NDP, Dropout + append-NDP : EWC/disjointMNIST_10/fc2048_fc2048_fc10/
+Python files:
+Dropout + importance-sampling : importance_reweighting/disjointMNIST_10/fc2048_fc2048_fc10/
+
+
+Complete : EWC/disjointMNIST_10/fc2048_fc2048_fc10/complete/
+EWC (no dropout except first time): EWC/disjointMNIST_10/fc2048_fc2048_fc10/EWC/
+Progress & Compress:
+Dropout + importance-sampling : importance_reweighting/disjointMNIST_10/fc2048_fc2048_fc10/
+
+EWC + append-NDP (no dropout except first time): EWC/disjointMNIST_10/fc2048_fc2048_fc10/EWC_appendNDP/
+Dropout + append-NDP : EWC/disjointMNIST_10/fc2048_fc2048_fc10/Dropout_appendNDP/Permuted MNIST:
+
+
+// not required - found tasks for class-incremental learning
+split_omniglot_1:
+	Alphabet_of_the_Magi:
+		LSH indexing not required
+		network_struct : ?
+
+		task0 : 0-15
+		Further tasks to learn each character incrementally
+		EWC - EWC/split_omniglot_1/Alphabet_of_the_Magi/network_struct/EWC/
+		pathint - pathint/split_omniglot_1/Alphabet_of_the_Magi/network_struct/pathint/
+		Dropout + importance-sampling : importance_reweighting/split_omniglot_1/Alphabet_of_the_Magi/network_struct/DIS/
+		Dropout + baseline1 : importance_reweighting/split_omniglot_1/Alphabet_of_the_Magi/network_struct/DB1/
+		Dropout + baseline2 : importance_reweighting/split_omniglot_1/Alphabet_of_the_Magi/network_struct/DB2/
+
+	Try out 4-5 tasks like Alphabet_of_the_Magi with 80-20% split of incremental learning
+
+split_omniglot_2:
+	LSH indexing not required
+	Language not relevant here ; just the characters
+	Mixing languages doesn't feel right as there could be a character which appears in multiple languages
