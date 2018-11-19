@@ -16,23 +16,35 @@ class Classifier(object):
 
 		self.input_shape = input_shape 			# input dimensions to the network
 		self.output_shape = output_shape 		# output dimensions to the network
-		self.checkpoint_path = checkpoint_path 	
+		self.checkpoint_path = checkpoint_path
 
+		self.learning_rate = None
+		self.is_training = None
 		self.createPlaceholders()
 
+		# mask unwanted scores ; simulates increasing softmax outputs when new class appears
+		self.scores_mask = None 				# tf variable storing mask
+		self.scores_mask_placeholder = None 	# tf placeholder to assign self.scores_mask
+		self.scores_mask_assign_op = None 		# tf operation to assign scores_mask
+		self.createScoresMask() 				# creates above objects for masking
+
 		# hyperparameters
-		self.learning_rate = 5e-6
+		# self.learning_rate = None
+		self.momentum = 0.9
+		self.reg = 0.0
 		self.apply_dropout = True
 		self.dropout_input_prob = 1.0
 		self.dropout_hidden_prob = 1.0
 
 		self.network = network 					# Network object
 		# feed-forward for training inputs
-		self.scores, self.layer_output = self.network.forward(self.x, self.apply_dropout, self.keep_prob_input, self.keep_prob_hidden)
+		self.scores, self.layer_output = self.network.forward(self.x, self.apply_dropout, self.keep_prob_input, self.keep_prob_hidden, is_training=self.is_training)
+		self.scores = tf.boolean_mask(self.scores, self.scores_mask, axis=1) 	# mask scores to remove unassigned class's scores
 
-		self.theta = None 						# list of tf trainable variables used to hold values of current task
+		self.theta = self.network.getLayerVariables() 		# list of tf trainable variables used to hold values of current task
 
 		self.loss = None 						# tf Tensor - loss
+		self.l2_loss = None 					# tf Tensor - regularization term
 		self.accuracy = None 					# tf Tensor - accuracy
 		self.createLossAccuracy() 				# computation graph for calculating loss and accuracy
 
@@ -42,12 +54,25 @@ class Classifier(object):
 	def createPlaceholders(self):
 		with tf.name_scope("prediction-inputs"):
 			self.x = tf.placeholder(tf.float32, [None] + list(self.input_shape), name='x-input')
-			self.y = tf.placeholder(tf.float32, [None] + list(self.output_shape), name='y-input')
+			self.y = tf.placeholder(tf.float32, [None] + [None for _ in range(len(self.output_shape))], name='y-input')
 		with tf.name_scope("dropout-probabilities"):
 			self.keep_prob_input = tf.placeholder(tf.float32)
 			self.keep_prob_hidden = tf.placeholder(tf.float32)
 		with tf.name_scope("loss-weights"):
 			self.loss_weights = tf.placeholder(tf.float32, [None])
+		with tf.name_scope("hprarms"):
+			self.learning_rate = tf.placeholder(tf.float32, [])
+		
+		self.is_training = tf.placeholder(tf.bool, [])
+
+	# creates self.scores_mask, op to assign it ; default mask set to using all outputs
+	def createScoresMask(self):
+		self.scores_mask = tf.Variable(np.ones(self.output_shape, dtype=np.bool), trainable=False)
+		self.scores_mask_placeholder = tf.placeholder(tf.bool, shape=list(self.output_shape))
+		self.scores_mask_assign = tf.assign(self.scores_mask, self.scores_mask_placeholder)
+	
+	def setScoresMask(self, sess, mask):
+		sess.run(self.scores_mask_assign, feed_dict={self.scores_mask_placeholder: mask})
 
 	# create computation graph for loss and accuracy
 	def createLossAccuracy(self):
@@ -55,6 +80,7 @@ class Classifier(object):
 			# improve : try just softmax_cross_entropy instead of sotmax_cross_entropy_with_logits?
 			average_nll = tf.reduce_sum(self.loss_weights * tf.nn.softmax_cross_entropy_with_logits(logits=self.scores, labels=self.y)) / tf.reduce_sum(self.loss_weights)
 			self.loss = average_nll
+			self.l2_loss = tf.add_n([tf.nn.l2_loss(v) for v in tf.trainable_variables() if ('bias' not in v.name and 'batch' not in v.name)])
 		with tf.name_scope('accuracy'):
 			accuracy = tf.reduce_mean(tf.cast(tf.equal(tf.argmax(self.scores, 1), tf.argmax(self.y, 1)), tf.float32))
 			self.accuracy = accuracy
@@ -71,8 +97,10 @@ class Classifier(object):
 	# create optimizer, loss function for training
 	def createTrainStep(self):
 		with tf.name_scope("optimizer"):
-			self.optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate)
-			return self.optimizer.minimize(self.loss, var_list=self.theta)
+			self.optimizer = tf.train.MomentumOptimizer(learning_rate=self.learning_rate, momentum=self.momentum)
+			update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+			with tf.control_dependencies(update_ops):
+				return self.optimizer.minimize(self.loss + self.reg / 2 * self.l2_loss, var_list=self.theta)
 	
 	# restore model with name : model_name
 	def restoreModel(self, sess, model_name):
@@ -103,16 +131,19 @@ class Classifier(object):
 
 	# Make single iteration of train, given input batch in feed_dict
 	def singleTrainStep(self, sess, feed_dict):
-		_, loss = sess.run([self.train_step, self.loss], feed_dict=feed_dict)
-		return loss
+		_, loss, accuracy = sess.run([self.train_step, self.loss, self.accuracy], feed_dict=feed_dict)
+		return loss, accuracy
 
 	# creat feed_dict using batch_xs, batch_ys
-	def createFeedDict(self, batch_xs, batch_ys, weights=None):
+	def createFeedDict(self, batch_xs, batch_ys, learning_rate=None, weights=None, is_training=False):
 		if weights is None:
 			weights = np.array([1 for _ in range(batch_xs.shape[0])])
 		feed_dict = {self.x: batch_xs, self.y: batch_ys, self.loss_weights: weights}
+		if learning_rate is not None:
+			feed_dict.update({self.learning_rate: learning_rate})
 		if self.apply_dropout:
 			feed_dict.update({self.keep_prob_hidden: self.dropout_hidden_prob, self.keep_prob_input: self.dropout_input_prob})
+		feed_dict.update({self.is_training: is_training})
 		return feed_dict
 
 	# set hyperparamters
@@ -120,6 +151,8 @@ class Classifier(object):
 		for k, v in hparams.items():
 			if (not isinstance(k, str)):
 				raise Exception('Panic! hyperparameter key not string')
+			if (k == 'learning_rate'):
+				continue
 			setattr(self, k, v)
 
 	# get output of layer just before logits
