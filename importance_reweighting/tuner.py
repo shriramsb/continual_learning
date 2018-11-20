@@ -228,7 +228,7 @@ class HyperparameterTuner(object):
 		i = 0 														# keeps track of iteration number
 		count_not_improving = 0 									# number of updates for which average validation accuracy isn't improving (starts after some threshold iterations)
 		dataset_train = self.appended_task_list[t].train 			# current task's train, validation datasets
-		dataset_val = self.task_list[t].test 					
+		dataset_val = self.task_list[t].validation 					
 		dataset_train.initializeIterator(batch_size) 				# set batch_size and pointer to start of dataset
 		dataset_val.initializeIterator(batch_size)
 

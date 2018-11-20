@@ -20,10 +20,11 @@ class Classifier(object):
 		self.checkpoint_path = checkpoint_path  
 		self.ewc_batch_size = 100               # batch size for calculation of EWC
 
+		self.learning_rate = None
 		self.createPlaceholders()
 
 		# hyperparameters
-		self.learning_rate = 5e-6
+		self.momentum = 0.9
 		self.fisher_multiplier = 0.0
 		self.apply_dropout = True
 		self.dropout_input_prob = 1.0
@@ -63,6 +64,8 @@ class Classifier(object):
 		with tf.name_scope("fisher-inputs"):
 			self.x_fisher = tf.placeholder(tf.float32, [self.ewc_batch_size] + list(self.input_shape))
 			self.y_fisher = tf.placeholder(tf.float32, [self.ewc_batch_size] + list(self.output_shape))
+		with tf.name_scope("hprarms"):
+			self.learning_rate = tf.placeholder(tf.float32, [])
 
 		self.fisher_average_scale = tf.placeholder(tf.float32)
 
@@ -123,12 +126,14 @@ class Classifier(object):
 	# create optimizer, loss function for training
 	def createTrainStep(self):
 		with tf.name_scope("optimizer"):
-			self.optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate)
+			self.optimizer = tf.train.MomentumOptimizer(learning_rate=self.learning_rate, momentum=self.momentum)
 			# fisher penalty
 			penalty = tf.add_n([tf.reduce_sum(tf.square(w1-w2)*f) for w1, w2, f
 								in zip(self.theta, self.theta_lagged, self.fisher_diagonal)])
 			self.loss_with_penalty = self.loss + (self.fisher_multiplier / 2) * penalty
-			return self.optimizer.minimize(self.loss + (self.fisher_multiplier / 2) * penalty, var_list=self.theta)
+			update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+			with tf.control_dependencies(update_ops):
+				return self.optimizer.minimize(self.loss + (self.fisher_multiplier / 2) * penalty, var_list=self.theta)
 	
 	# restore model with name : model_name
 	def restoreModel(self, sess, model_name):
@@ -159,12 +164,14 @@ class Classifier(object):
 
 	# Make single iteration of train, given input batch in feed_dict
 	def singleTrainStep(self, sess, feed_dict):
-		_, loss, loss_with_penalty = sess.run([self.train_step, self.loss, self.loss_with_penalty], feed_dict=feed_dict)
-		return loss, loss_with_penalty
+		_, loss, loss_with_penalty, accuracy = sess.run([self.train_step, self.loss, self.loss_with_penalty, self.accuracy], feed_dict=feed_dict)
+		return loss, loss_with_penalty, accuracy
 
 	# creat feed_dict using batch_xs, batch_ys
-	def createFeedDict(self, batch_xs, batch_ys):
+	def createFeedDict(self, batch_xs, batch_ys, learning_rate=None):
 		feed_dict = {self.x: batch_xs, self.y: batch_ys}
+		if learning_rate is not None:
+			feed_dict.update({self.learning_rate : learning_rate})
 		if self.apply_dropout:
 			feed_dict.update({self.keep_prob_hidden: self.dropout_hidden_prob, self.keep_prob_input: self.dropout_input_prob})
 		return feed_dict
@@ -189,6 +196,8 @@ class Classifier(object):
 		for k, v in hparams.items():
 			if (not isinstance(k, str)):
 				raise Exception('Panic! hyperparameter key not string')
+			if (k == 'learning_rate'):
+				continue
 			setattr(self, k, v)
 
 	# get output of layer just before logits

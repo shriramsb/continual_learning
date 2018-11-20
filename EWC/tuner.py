@@ -10,6 +10,8 @@ import os
 import time
 import pickle
 
+import torch
+
 import tensorflow as tf
 
 MINI_BATCH_SIZE = 250
@@ -95,7 +97,7 @@ class HyperparameterTuner(object):
 		self.default_hparams = {'learning_rate': 5e-6, 'fisher_multiplier': 0.0,  		# default values of hparams
 								'dropout_input_prob': 1.0, 'dropout_hidden_prob': 1.0}
 		self.num_tolerate_epochs = 2 							# number of epochs to wait if validation accuracy isn't improving
-		self.eval_frequency = 1000 								# frequency of calculation of validation accuracy
+		self.eval_frequency = 1 								# frequency of calculation of validation accuracy
 		self.print_every = 1000 								# frequency of printing, if verbose during training
 		
 		# create checkpoint and summaries directories if they don't exist
@@ -114,12 +116,13 @@ class HyperparameterTuner(object):
 		# classifier object
 		self.classifier = Classifier(network, input_shape, output_shape, checkpoint_path)
 
+		self.use_gpu = True 											# if use gpu for matrix multiplication - uses PyTorch for mm
+		
 		self.save_penultimate_output = False 							# specifies whether to save penultimate output after training on a task
 		# number of examples from all old tasks to append to current task (per example), just before starting to train on it, to avoid forgetting of old tasks
 		# task after appending with examples to train set from old tasks
-		self.tuner_hparams = {}
-		self.tuner_hparams['per_example_append'] = 0
 		self.appended_task_list = [None for _ in range(self.num_tasks)]
+		self.tuner_hparams = {'old:new' : 4}
 
 	def setPerExampleAppend(self, val):
 		self.tuner_hparams['per_example_append'] = val
@@ -128,8 +131,12 @@ class HyperparameterTuner(object):
 		else:
 			self.save_penultimate_output = False
 
+	def getLearningRate(self, base_lr, epoch):
+		return base_lr
+
 	# train on a given task with given hparams - hparams
-	def train(self, t, hparams, batch_size, model_init_name, num_updates=-1, verbose=False):
+	# save every epoch not supported yet
+	def train(self, t, hparams, batch_size, model_init_name, num_updates=-1, verbose=False, save_weights_every_epoch=False):
 		# make sure hparams has all required hparams for classifier
 		default_hparams = deepcopy(self.default_hparams)
 		default_hparams.update(hparams)
@@ -148,9 +155,10 @@ class HyperparameterTuner(object):
 		val_loss = [[] for _ in range(t + 1)]
 		loss = []											# training loss, loss with fisher penalty for current task
 		loss_with_penalty = []
+		train_acc = []
 
 		cur_best_avg = 0.0 									# best weighted average validation accuracy and update number at which it occurs
-		cur_best_avg_num_updates = -1
+		cur_best_avg_num_epoch = -1
 		i = 0												# keeps track of iteration number
 		count_not_improving = 0 							# number of updates for which average validation accuracy isn't improving (starts after some threshold iterations)
 		dataset_train = self.appended_task_list[t].train 	# current task's train, validation datasets
@@ -160,18 +168,25 @@ class HyperparameterTuner(object):
 
 		updates_per_epoch = math.ceil(self.task_list[t].train.images.shape[0] / batch_size) 	# number of train steps in an epoch
 		self.num_tolerate_epochs = 2 												# number of epochs to wait if average validation accuracy isn't improving
+		epoch = 0
 		# training loop
 		while (True):
 			# single step of training
 			batch_xs, batch_ys = dataset_train.nextBatch(self.sess)
-			feed_dict = self.classifier.createFeedDict(batch_xs, batch_ys)
-			cur_loss, cur_loss_with_penalty = self.classifier.singleTrainStep(self.sess, feed_dict)
+			cur_lr = self.getLearningRate(hparams['learning_rate'], epoch)
+			feed_dict = self.classifier.createFeedDict(batch_xs, batch_ys, learning_rate=cur_lr)
+			cur_loss, cur_loss_with_penalty, cur_accuracy = self.classifier.singleTrainStep(self.sess, feed_dict)
 
 			loss.append(cur_loss)
 			loss_with_penalty.append(cur_loss_with_penalty)
+			train_acc.append(cur_accuracy)
 			
-			if (i % self.eval_frequency == 0):
-				cur_iter_weighted_avg = 0.0 		# weighted averaged of validation accuracy
+			i += 1
+			if (i % updates_per_epoch == 0):
+				epoch += 1
+
+			if (epoch % self.eval_frequency == 0 and i % updates_per_epoch == 0):	
+				cur_iter_weighted_avg = 0.0
 				cur_iter_weights_sum = 0
 				# get validation accuracy for all tasks till 't'
 				accuracy = self.validationAccuracy(t, VALIDATION_BATCH_SIZE, restore_model=False, get_loss=True)
@@ -192,75 +207,117 @@ class HyperparameterTuner(object):
 				# store update number at which validation accuracy is maximum
 				if (cur_iter_weighted_avg > cur_best_avg):
 					cur_best_avg = cur_iter_weighted_avg
-					cur_best_avg_num_updates = i
+					cur_best_avg_num_epoch = epoch
 
 				# stop training if validation accuracy not improving for self.num_tolerate_epochs epochs
-				if (count_not_improving * self.eval_frequency >= updates_per_epoch * self.num_tolerate_epochs):
+				if (count_not_improving * self.eval_frequency >= self.num_tolerate_epochs):
 					if (num_updates == -1):
 						break
+
+				print("epoch: %d, iter: %d/%d, validation accuracies: %s, average train loss: %f, average train accuracy: %f" % 
+						(epoch, i - epoch * updates_per_epoch, updates_per_epoch,
+						str(np.array(val_acc)[:, -1]), 
+						np.mean(loss[i - updates_per_epoch : ]), np.mean(train_acc[i - updates_per_epoch : ])))
 			
 			# print stats if verbose
 			if (verbose and (i % self.print_every == 0)):
-				print("validation accuracies: %s, loss: %f, loss with penalty: %f" % (str(np.array(val_acc)[:, -1]), loss[-1], loss_with_penalty[-1]))
+				print("epoch: %d, iter: %d/%d, loss: %f, accuracy: %f" % 
+						(epoch, i - epoch * updates_per_epoch, updates_per_epoch,
+						loss[-1], train_acc[-1]))
 
-			i += 1
 			# break if num_updates is specified ; break at nearest epoch which requires updates >= num_updates
-			if (num_updates >= 0 and (i >= math.ceil(num_updates / updates_per_epoch) * updates_per_epoch)):
+			if (num_updates >= 0 and (epoch >= math.ceil(num_updates / updates_per_epoch))):
 				break
 				
 			total_updates = i
 
-		print("epochs: %f, final train loss: %f, validation accuracies: %s" % (i / updates_per_epoch, loss[-1], str(np.array(val_acc)[:, -1])))
-		print("best updates: %d, best epochs: %f, best_avg: %f, validation accuracies: %s" % 
-				(cur_best_avg_num_updates, cur_best_avg_num_updates / updates_per_epoch, cur_best_avg, np.array(val_acc)[:, cur_best_avg_num_updates // self.eval_frequency]))
+		print("epochs: %f, final train loss: %f, validation accuracies: %s" % (epoch, loss[-1], str(np.array(val_acc)[:, -1])))
+		print("best epochs: %f, best_avg: %f, validation accuracies: %s" % 
+				(cur_best_avg_num_epoch, cur_best_avg, np.array(val_acc)[:, (cur_best_avg_num_epoch - 1) // self.eval_frequency]))
 		
 		ret = {}
 		ret['val_acc'] = val_acc
 		ret['val_loss'] = val_loss
 		ret['loss'] = loss
 		ret['loss_with_penalty'] = loss_with_penalty
+		ret['acc'] = train_acc
 		ret['best_avg'] = cur_best_avg
-		ret['best_avg_updates'] = cur_best_avg_num_updates
+		ret['best_epoch'] = cur_best_avg_num_epoch
+		ret['updates_per_epoch'] = updates_per_epoch
 		ret['total_updates'] = total_updates
+		ret['total_epochs'] = epoch
 		return ret
 
 	# append task with examples from previous tasks
-	def getAppendedTask(self, t, model_init_name, batch_size):
+	def getAppendedTask(self, t, model_init_name, batch_size, optimize_space=False, equal_weights=False, apply_log=False):
 		appended_task = None
 
-		# load penultimate output of previous tasks' examples for model_init_name 
-		with open(self.checkpoint_path + model_init_name + '_penultimate_output.txt', 'rb') as f:
-			old_penultimate_output, old_taskid_offset = pickle.load(f)
+		# if equal_weights is True, then assign equal weights to all points till current task. 
+		# Otherwise, weigh each point of previous tasks by cosine similarity to current task's points
+		if (not equal_weights):
+			if (model_init_name is not None):
+				self.classifier.restoreModel(self.sess, model_init_name)
+			# load penultimate output of previous tasks' examples for model_init_name 
+			with open(self.checkpoint_path + model_init_name + '_penultimate_output.txt', 'rb') as f:
+				old_penultimate_output, old_taskid_offset = pickle.load(f)
 		
-		# penultimate output of current task for model_init_name
-		cur_penultimate_output, _ = self.getPenultimateOutput(t, batch_size)
+			# penultimate output of current task for model_init_name
+			cur_penultimate_output, _ = self.getPenultimateOutput(t, batch_size)
 
-		# similarity - each row gives cosine similarity between an example from current task with all examples from previous tasks
-		similarity = np.matmul(cur_penultimate_output, old_penultimate_output.T)
-		cur_penultimate_output_norm = np.sqrt(np.sum((cur_penultimate_output ** 2), axis=1))
-		old_penultimate_output_norm = np.sqrt(np.sum((old_penultimate_output ** 2), axis=1))
-		similarity = similarity / old_penultimate_output_norm / np.expand_dims(cur_penultimate_output_norm, axis=1)
+			# norm of vectors for cosine similarity
+			cur_penultimate_output_norm = np.sqrt(np.sum((cur_penultimate_output ** 2), axis=1))
+			old_penultimate_output_norm = np.sqrt(np.sum((old_penultimate_output ** 2), axis=1))
+
+			# similarity - each row gives cosine similarity between an example from current task with all examples from previous tasks
+			# if required to optimize space, do multiplication one row at a time of current task's example's output with matrix of previous tasks' examples' outputs
+			if (optimize_space):
+				similarity = np.empty((cur_penultimate_output.shape[0], (old_penultimate_output.T).shape[1]), np.float32)
+				# use gpu for multiplication if available ; using PyTorch here
+				if (self.use_gpu):
+					b = torch.Tensor(old_penultimate_output.T).cuda()
+				for i in range(cur_penultimate_output.shape[0]):
+					if (self.use_gpu):
+						a = torch.Tensor(np.expand_dims(cur_penultimate_output[i], axis=0)).cuda()
+						similarity[i] = torch.mm(a, b).cpu()
+						del a
+					else:
+						similarity[i] = np.matmul(cur_penultimate_output[i], old_penultimate_output.T)
+					similarity[i] = similarity[i] / old_penultimate_output_norm / cur_penultimate_output_norm[i]
+					if (apply_log):
+						similarity[i] = -np.log(similarity[i] + 1e-24)
+				if (self.use_gpu):
+					del b
+			else:
+				similarity = np.matmul(cur_penultimate_output, old_penultimate_output.T)
+				similarity = similarity / old_penultimate_output_norm / np.expand_dims(cur_penultimate_output_norm, axis=1)
+				if (apply_log):
+					similarity = -np.log(similarity + 1e-24)
 		
-		# appending train data of current task; for each data point of current task, append top k similar data points from previous tasks
-		per_example_append = self.tuner_hparams['per_example_append']
-		topk_similar = np.argsort(similarity, axis=-1)[:, -per_example_append: ]
-		train_task = self.task_list[t].train
-		appended_images_shape = tuple([train_task.images.shape[0] * (per_example_append + 1)] + list(train_task.images.shape)[1: ])
-		appended_labels_shape = tuple([train_task.labels.shape[0] * (per_example_append + 1)] + list(train_task.labels.shape)[1: ])
-		appended_images = np.empty(appended_images_shape)
-		appended_labels = np.empty(appended_labels_shape)
+			train_task = self.task_list[t].train
 
-		offset = 0
-		for i in range(train_task.images.shape[0]):
-			appended_images[offset] = train_task.images[i]
-			appended_labels[offset] = train_task.labels[i]
-			for j in range(per_example_append):
-				index = old_taskid_offset[topk_similar[i, j]]
-				appended_images[offset + j + 1] = self.task_list[index[0]].train.images[index[1]]
-				appended_labels[offset + j + 1] = self.task_list[index[0]].train.labels[index[1]]
-			offset += 1 + per_example_append
+			old_new_ratio = self.tuner_hparams['old:new']
+			topk_similar = np.argsort(similarity, axis=-1)[:, -old_new_ratio: ]
+			appended_images_shape = tuple([train_task.images.shape[0] * (old_new_ratio + 1)] + list(train_task.images.shape)[1: ])
+			appended_labels_shape = tuple([train_task.labels.shape[0] * (old_new_ratio + 1)] + list(train_task.labels.shape)[1: ])
+			appended_images = np.empty(appended_images_shape)
+			appended_labels = np.empty(appended_labels_shape)
 
-		appended_task = MyTask(self.task_list[t], appended_images, appended_labels)    		
+			offset = 0
+			for i in range(train_task.images.shape[0]):
+				appended_images[offset] = train_task.images[i]
+				appended_labels[offset] = train_task.labels[i]
+				for j in range(old_new_ratio):
+					index = old_taskid_offset[topk_similar[i, j]]
+					appended_images[offset + j + 1] = self.task_list[index[0]].train.images[index[1]]
+					appended_labels[offset + j + 1] = self.task_list[index[0]].train.labels[index[1]]
+				offset += 1 + old_new_ratio
+
+			appended_task = MyTask(self.task_list[t], appended_images, appended_labels)    		
+			
+		else:
+			print("Cannot have equal weights here. Would require to append all examples")
+			exit(0)
+
 		return appended_task
 
 
@@ -270,30 +327,39 @@ class HyperparameterTuner(object):
 		return tuple(hparams_tuple)
 
 	# Train on task 't' with hparams in self.hparams_list[t] and find the best one ; calls train() internally ; ; make sure all previous tasks have been trained
-	def tuneOnTask(self, t, batch_size, model_init_name=None, num_updates=-1, verbose=False, save_weights=True, update_fisher=True):
+	def tuneOnTask(self, t, batch_size, model_init_name=None, num_updates=-1, verbose=False, restore_params=True, 
+					equal_weights=False, apply_log=False,
+					save_weights_every_epoch=False, save_weights_end=True,
+					final_train=False):
 		best_avg = 0.0							# best average validation accuracy and hparams corresponding to it from self.hparams_list[t]
 		best_hparams = None
+
+		if (not restore_params):
+			model_init_name = None
+
 		if model_init_name is None:				# model with which to initialize weights
-			model_init_name = self.best_hparams[t - 1][-1] if t > 0 else None
+			if (restore_params):
+				model_init_name = self.best_hparams[t - 1][-1] if t > 0 else None
 		
 		# appende examples to current task from old task if required
-		per_example_append = self.tuner_hparams['per_example_append']
-		if (per_example_append > 0):
+		old_new_ratio = self.tuner_hparams['old:new']
+		if (old_new_ratio > 0):
 			if (t == 0):
 				self.appended_task_list[0] = self.task_list[0]
 			else:
-				self.classifier.restoreModel(self.sess, model_init_name)
-				self.appended_task_list[t] = self.getAppendedTask(t, model_init_name, batch_size)
+				self.appended_task_list[t] = self.getAppendedTask(t, model_init_name, batch_size, optimize_space=True, equal_weights=equal_weights, 
+																	apply_log=apply_log)
 		else:
 			self.appended_task_list[t] = self.task_list[t]
 			
+
 		# loop through self.hparams_list[t], train with it and find the best one
 		for hparams in self.hparams_list[t]:
-			cur_result = self.train(t, hparams, batch_size, model_init_name, num_updates=num_updates, verbose=verbose)
-			if update_fisher:
-				self.classifier.updateFisherFullBatch(self.sess, self.task_list[t].train)
+			cur_result = self.train(t, hparams, batch_size, model_init_name, num_updates=num_updates, verbose=verbose, 
+									save_weights_every_epoch=save_weights_every_epoch)
 			cur_best_avg = cur_result['best_avg']
-			if (save_weights):
+			if (save_weights_end):
+				self.classifier.updateFisherFullBatch(self.sess, self.task_list[t].train)
 				self.classifier.saveWeights(cur_result['total_updates'], self.sess, self.fileName(t, hparams, self.tuner_hparams))
 			self.saveResults(cur_result, self.fileName(t, hparams, self.tuner_hparams))
 			hparams_tuple = self.hparamsDictToTuple(hparams, self.tuner_hparams)
@@ -313,12 +379,13 @@ class HyperparameterTuner(object):
 				self.best_hparams[t] = (best_hparams, self.tuner_hparams, self.fileName(t, best_hparams, self.tuner_hparams))
 
 		# retrain model for best_avg_updates for best hparam to get optimal validation accuracy
-		best_hparams_tuple = self.hparamsDictToTuple(best_hparams, self.tuner_hparams)
-		cur_result = self.train(t, best_hparams, batch_size, model_init_name,
-								num_updates=self.results_list[t][best_hparams_tuple]['best_avg_updates'])
-		self.classifier.updateFisherFullBatch(self.sess, self.task_list[t].train)
-		self.classifier.saveWeights(self.results_list[t][best_hparams_tuple]['best_avg_updates'], 
-										self.sess, self.fileName(t, best_hparams, self.tuner_hparams))
+		if final_train:
+			best_hparams_tuple = self.hparamsDictToTuple(best_hparams, self.tuner_hparams)
+			cur_result = self.train(t, best_hparams, batch_size, model_init_name,
+									num_updates=self.results_list[t][best_hparams_tuple]['best_epoch'] * self.results_list[t][best_hparams_tuple]['updates_per_epoch'])
+			self.classifier.updateFisherFullBatch(self.sess, self.task_list[t].train)
+			self.classifier.saveWeights(self.results_list[t][best_hparams_tuple]['best_epoch'] * self.results_list[t][best_hparams_tuple]['updates_per_epoch'], 
+											self.sess, self.fileName(t, best_hparams, self.tuner_hparams))
 
 		# calculate penultimate output of all tasks till 't' and save to file
 		if (self.save_penultimate_output):
@@ -333,10 +400,12 @@ class HyperparameterTuner(object):
 		return best_avg, best_hparams
 
 	# train on a range of tasks sequentially [start, end] with different hparams ; currently only positive num_updates allowed
-	def tuneTasksInRange(self, start, end, batch_size, num_hparams, num_updates=0, verbose=False, update_fisher=True):
+	def tuneTasksInRange(self, start, end, batch_size, num_hparams, num_updates=0, verbose=False, equal_weights=False, restore_params=True, 
+							apply_log=False, early_stop=False, 
+							old_new_ratio_list=None):
 		if (num_updates < 0):
 			print("bad num_updates argument.. stopping")
-			return 0, tuner.hparams_list[start][0]
+			return 0, self.hparams_list[start][0]
 
 		best_avg = 0.0
 		best_hparams_index = -1
@@ -347,32 +416,37 @@ class HyperparameterTuner(object):
 			for i in range(start, end + 1):
 				model_init_name = None
 				if (i > 0):
-					model_init_name = self.fileName(i - 1, self.hparams_list[i - 1][k], self.tuner_hparams)
+					if (restore_params):
+						model_init_name = self.fileName(i - 1, self.hparams_list[i - 1][k], self.tuner_hparams)
 				
-				per_example_append = self.tuner_hparams['per_example_append']
-				if (per_example_append > 0):
+				if (old_new_ratio_list is not None):
+					self.setPerExampleAppend(old_new_ratio_list[i])
+					old_new_ratio = self.tuner_hparams['old:new']
+				if (old_new_ratio > 0):
 					if i == 0:
 						self.appended_task_list[i] = self.task_list[i]
 					else:
-						self.classifier.restoreModel(self.sess, model_init_name)
-						self.appended_task_list[i] = self.getAppendedTask(i, model_init_name, batch_size)
+						self.appended_task_list[i] = self.getAppendedTask(i, model_init_name, batch_size, optimize_space=True, equal_weights=equal_weights, 
+																			apply_log=apply_log)
 				else:
 					self.appended_task_list[i] = self.task_list[i]
 
 				hparams = self.hparams_list[i][k]
 				cur_result = self.train(i, hparams, batch_size, model_init_name, num_updates=num_updates, verbose=verbose)
-				if update_fisher:
+				if (not early_stop):
 					self.classifier.updateFisherFullBatch(self.sess, self.task_list[i].train)
+					self.classifier.saveWeights(cur_result['total_updates'], self.sess, self.fileName(i, hparams, self.tuner_hparams))
+				
 				self.saveResults(cur_result, self.fileName(i, hparams, self.tuner_hparams))
 				hparams_tuple = self.hparamsDictToTuple(hparams, self.tuner_hparams)
 				self.results_list[i][hparams_tuple] = cur_result
 
-				cur_result = self.train(i, hparams, batch_size, model_init_name,
-								num_updates=self.results_list[i][hparams_tuple]['best_avg_updates'])
-				self.classifier.updateFisherFullBatch(self.sess, self.task_list[i].train)
-				self.classifier.saveWeights(self.results_list[i][hparams_tuple]['best_avg_updates'], 
+				if early_stop:
+					cur_result = self.train(i, hparams, batch_size, model_init_name,
+									num_updates=self.results_list[i][hparams_tuple]['best_epoch'] * self.results_list[i][hparams_tuple]['updates_per_epoch'])
+					self.classifier.updateFisherFullBatch(self.sess, self.task_list[i].train)
+					self.classifier.saveWeights(self.results_list[i][hparams_tuple]['best_epoch'] * self.results_list[i][hparams_tuple]['updates_per_epoch'], 
 												self.sess, self.fileName(i, hparams, self.tuner_hparams))
-				hparams_tuple = self.hparamsDictToTuple(hparams, self.tuner_hparams)
 				
 				cur_best_avg = self.results_list[i][hparams_tuple]['best_avg']
 
@@ -390,6 +464,8 @@ class HyperparameterTuner(object):
 				best_hparams_index = k
 
 		for i in range(end + 1):
+			if (old_new_ratio_list is not None):
+				self.setPerExampleAppend(old_new_ratio_list[i])
 			self.best_hparams[i] = (self.hparams_list[i][best_hparams_index], self.tuner_hparams, self.fileName(self.hparams_list[i][best_hparams_index], self.tuner_hparams))
 
 		return best_avg, best_hparams_index
@@ -439,6 +515,7 @@ class HyperparameterTuner(object):
 			offset += num_remaining
 
 		return penultimate_output, taskid_offset
+
 
 	# validation loss, accuracy till task 't'
 	def validationAccuracy(self, t, batch_size, restore_model=True, get_loss=False):
