@@ -315,14 +315,14 @@ class HyperparameterTuner(object):
 		return ret
 
 	# append task with examples from previous tasks
-	def getAppendedTask(self, t, model_init_name, batch_size, optimize_space=False, equal_weights=False, apply_log=False):
+	def getAppendedTask(self, t, model_init_name, batch_size, optimize_space=False, equal_weights=False, apply_log=False, is_sampling_reweighing=True):
 		appended_task = None
 
 		# if equal_weights is True, then assign equal weights to all points till current task. 
 		# Otherwise, weigh each point of previous tasks by cosine similarity to current task's points
 		if (not equal_weights):
-
-			self.classifier.restoreModel(self.sess, model_init_name)
+			if (model_init_name is not None):	
+				self.classifier.restoreModel(self.sess, model_init_name)
 			# load penultimate output of previous tasks' examples for model_init_name 
 			with open(self.checkpoint_path + model_init_name + '_penultimate_output.txt', 'rb') as f:
 				old_penultimate_output, old_taskid_offset = pickle.load(f)
@@ -362,29 +362,49 @@ class HyperparameterTuner(object):
 			train_task = self.task_list[t].train
 
 			old_new_ratio = self.tuner_hparams['old:new']
-			old_task_weights = np.sum(similarity, axis=0)
-			old_task_weights = old_task_weights / np.sum(old_task_weights)
-			old_task_weights = old_task_weights * old_new_ratio / (old_new_ratio + 1)
-			cur_task_weights = np.array([1.0 / (old_new_ratio + 1) for _ in range(train_task.images.shape[0])]) / train_task.images.shape[0]
+			if (is_sampling_reweighing):
+				old_task_weights = np.sum(similarity, axis=0)
+				old_task_weights = old_task_weights / np.sum(old_task_weights)
+				old_task_weights = old_task_weights * old_new_ratio / (old_new_ratio + 1)
+				cur_task_weights = np.array([1.0 / (old_new_ratio + 1) for _ in range(train_task.images.shape[0])]) / train_task.images.shape[0]
 
-			appended_images_shape = tuple([train_task.images.shape[0] + old_penultimate_output.shape[0]] + list(train_task.images.shape)[1: ])
-			appended_labels_shape = tuple([train_task.labels.shape[0] + old_penultimate_output.shape[0]] + list(train_task.labels.shape)[1: ])
-			appended_weights_shape = tuple([train_task.labels.shape[0] + old_penultimate_output.shape[0]])
+				appended_images_shape = tuple([train_task.images.shape[0] + old_penultimate_output.shape[0]] + list(train_task.images.shape)[1: ])
+				appended_labels_shape = tuple([train_task.labels.shape[0] + old_penultimate_output.shape[0]] + list(train_task.labels.shape)[1: ])
+				appended_weights_shape = tuple([train_task.labels.shape[0] + old_penultimate_output.shape[0]])
 
-			appended_images = np.empty(appended_images_shape)
-			appended_labels = np.empty(appended_labels_shape)
-			appended_weights = np.empty(appended_weights_shape)
+				appended_images = np.empty(appended_images_shape)
+				appended_labels = np.empty(appended_labels_shape)
+				appended_weights = np.empty(appended_weights_shape)
 
-			offset = 0
-			for i in range(t + 1):
-				appended_images[offset : offset + self.task_list[i].train.images.shape[0]] = self.task_list[i].train.images
-				appended_labels[offset : offset + self.task_list[i].train.labels.shape[0]] = self.task_list[i].train.labels
-				offset += self.task_list[i].train.images.shape[0]
-			
-			appended_weights[0 : old_task_weights.shape[0]] = old_task_weights
-			appended_weights[ old_task_weights.shape[0] : ] = cur_task_weights
-			
-			appended_task = MyTask(self.task_list[t], train_images=appended_images, train_labels=appended_labels, weights=appended_weights)
+				offset = 0
+				for i in range(t + 1):
+					appended_images[offset : offset + self.task_list[i].train.images.shape[0]] = self.task_list[i].train.images
+					appended_labels[offset : offset + self.task_list[i].train.labels.shape[0]] = self.task_list[i].train.labels
+					offset += self.task_list[i].train.images.shape[0]
+				
+				appended_weights[0 : old_task_weights.shape[0]] = old_task_weights
+				appended_weights[ old_task_weights.shape[0] : ] = cur_task_weights
+				
+				appended_task = MyTask(self.task_list[t], train_images=appended_images, train_labels=appended_labels, weights=appended_weights)
+			else:
+				topk_similar = np.argsort(similarity, axis=-1)[:, -old_new_ratio: ]
+				appended_images_shape = tuple([train_task.images.shape[0] * (old_new_ratio + 1)] + list(train_task.images.shape)[1: ])
+				appended_labels_shape = tuple([train_task.labels.shape[0] * (old_new_ratio + 1)] + list(train_task.labels.shape)[1: ])
+				appended_images = np.empty(appended_images_shape)
+				appended_labels = np.empty(appended_labels_shape)
+
+				offset = 0
+				for i in range(train_task.images.shape[0]):
+					appended_images[offset] = train_task.images[i]
+					appended_labels[offset] = train_task.labels[i]
+					for j in range(old_new_ratio):
+						index = old_taskid_offset[topk_similar[i, j]]
+						appended_images[offset + j + 1] = self.task_list[index[0]].train.images[index[1]]
+						appended_labels[offset + j + 1] = self.task_list[index[0]].train.labels[index[1]]
+					offset += 1 + old_new_ratio
+
+				appended_task = MyTask(self.task_list[t], appended_images, appended_labels)
+
 		
 		else:
 			train_task = self.task_list[t].train
@@ -421,7 +441,8 @@ class HyperparameterTuner(object):
 	def tuneOnTask(self, t, batch_size, model_init_name=None, num_updates=-1, verbose=False, restore_params=True, 
 					equal_weights=False, apply_log=False,
 					save_weights_every_epoch=False, save_weights_end=True, 
-					final_train=False, random_crop_flip=False):
+					final_train=False, random_crop_flip=False, 
+					is_sampling_reweighing=True):
 		best_avg = 0.0 								# best average validation accuracy and hparams corresponding to it from self.hparams_list[t]
 		best_hparams = None
 		if model_init_name is None: 				# model with which to initialize weights
@@ -435,7 +456,7 @@ class HyperparameterTuner(object):
 				self.appended_task_list[0] = self.task_list[0]
 			else:
 				self.appended_task_list[t] = self.getAppendedTask(t, model_init_name, batch_size, optimize_space=True, equal_weights=equal_weights, 
-																	apply_log=apply_log)
+																	apply_log=apply_log, is_sampling_reweighing=is_sampling_reweighing)
 		else:
 			self.appended_task_list[t] = self.task_list[t]
 		
@@ -507,7 +528,7 @@ class HyperparameterTuner(object):
 	# train on a range of tasks sequentially [start, end] with different hparams ; currently only positive num_updates allowed
 	def tuneTasksInRange(self, start, end, batch_size, num_hparams, num_updates=0, verbose=False, equal_weights=False, restore_params=True, 
 							apply_log=False, random_crop_flip=False, early_stop=False, 
-							old_new_ratio_list=None):
+							old_new_ratio_list=None, is_sampling_reweighing=True):
 		if (num_updates < 0):
 			print("bad num_updates argument.. stopping")
 			return 0, self.hparams_list[start][0]
@@ -533,7 +554,7 @@ class HyperparameterTuner(object):
 						self.appended_task_list[i] = self.task_list[i]
 					else:
 						self.appended_task_list[i] = self.getAppendedTask(i, model_init_name, batch_size, optimize_space=True, equal_weights=equal_weights, 
-																			apply_log=apply_log)
+																			apply_log=apply_log, is_sampling_reweighing=is_sampling_reweighing)
 				else:
 					self.appended_task_list[i] = self.task_list[i]
 
