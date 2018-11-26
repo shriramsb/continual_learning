@@ -21,9 +21,11 @@ class Classifier(object):
 		self.ewc_batch_size = 100               # batch size for calculation of EWC
 
 		self.learning_rate = None
+		self.is_training = None
 		self.createPlaceholders()
 
 		# hyperparameters
+		self.reg = 0.0
 		self.momentum = 0.9
 		self.fisher_multiplier = 0.0
 		self.apply_dropout = True
@@ -32,8 +34,9 @@ class Classifier(object):
 
 		self.network = network                  # Network object
 		# feed-forward for training inputs
-		self.scores, self.layer_output = self.network.forward(self.x, self.apply_dropout, self.keep_prob_input, self.keep_prob_hidden)
+		self.scores, self.layer_output = self.network.forward(self.x, self.apply_dropout, self.keep_prob_input, self.keep_prob_hidden, is_training=self.is_training)
 
+		self.all_theta = [v for v in tf.trainable_variables()]
 		self.theta = None                       # list of tf trainable variables used to hold values of current task
 		self.theta_lagged = None                # list of tf trainable variables used to hold values of previous task
 		self.fisher_diagonal = None             # list of tf variable having importance of each variable
@@ -51,7 +54,7 @@ class Classifier(object):
 		self.update_with_new_fisher_diagonal_op = None  # tf operation to take average of parameter importances 
 		self.createFisherOps()                      # computation graph for calculating fisher
 
-		self.saver = tf.train.Saver(max_to_keep=100, keep_checkpoint_every_n_hours=1, var_list=self.theta + self.theta_lagged + self.fisher_diagonal)
+		self.saver = tf.train.Saver(max_to_keep=100, keep_checkpoint_every_n_hours=1, var_list=self.all_theta + self.theta_lagged + self.fisher_diagonal)
 	
 	# creates tensorflow placeholders for training, fisher calculation input, averaging accumulated importance
 	def createPlaceholders(self):
@@ -67,11 +70,13 @@ class Classifier(object):
 		with tf.name_scope("hprarms"):
 			self.learning_rate = tf.placeholder(tf.float32, [])
 
+		self.is_training = tf.placeholder(tf.bool, [])
+
 		self.fisher_average_scale = tf.placeholder(tf.float32)
 
 	# create tf variables for previous tasks' parameters and fisher diagonal
 	def createFisherDiagonal(self):
-		self.theta = self.network.getLayerVariables()
+		self.theta = [v for v in tf.trainable_variables() if ('kernel' in v.name or 'bias' in v.name)]
 		self.theta_lagged = []
 		self.fisher_diagonal = []
 		# for each tf variable in network, create two variables of same size, for backed up parameter values and their importances
@@ -84,6 +89,7 @@ class Classifier(object):
 		with tf.name_scope("loss"):
 			average_nll = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits=self.scores, labels=self.y))  # wat abt just softmax_cross_entropy
 			self.loss = average_nll
+			self.l2_loss = tf.add_n([tf.nn.l2_loss(v) for v in tf.trainable_variables() if ('bias' not in v.name and 'batch' not in v.name)])
 		with tf.name_scope('accuracy'):
 			accuracy = tf.reduce_mean(tf.cast(tf.equal(tf.argmax(self.scores, 1), tf.argmax(self.y, 1)), tf.float32))
 			self.accuracy = accuracy
@@ -98,8 +104,8 @@ class Classifier(object):
 			self.new_fisher_diagonal.append(tf.Variable(tf.constant(0.0, shape=self.theta[i].shape), trainable=False))
 			self.zero_new_fisher_diagonal.append(tf.assign(self.new_fisher_diagonal[i], tf.constant(0.0, shape=self.new_fisher_diagonal[i].shape)))     # just use .op here to avoid getting return value
 
-		scores, _ = self.network.forward(self.x_fisher, apply_dropout=False)                        # prediction for current batch
-		unaggregated_nll = tf.reduce_sum(-1 * self.y_fisher * tf.nn.log_softmax(scores), axis=1)    # nll for each input in batch
+		# scores, _ = self.network.forward(self.x_fisher, apply_dropout=False)                        # prediction for current batch
+		unaggregated_nll = tf.reduce_sum(-1 * self.y * tf.nn.log_softmax(self.scores), axis=1)    # nll for each input in batch
 		self.accumulate_squared_gradients = []                      # list (sum_i of gradient^2 of nll[i] w.r.t parameter) for each parameter
 		for i in range(len(self.theta)):
 			sum_gradient_squared = tf.add_n([tf.square(tf.gradients(unaggregated_nll[j], self.theta[i])[0]) for j in range(self.ewc_batch_size)])
@@ -133,7 +139,7 @@ class Classifier(object):
 			self.loss_with_penalty = self.loss + (self.fisher_multiplier / 2) * penalty
 			update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
 			with tf.control_dependencies(update_ops):
-				return self.optimizer.minimize(self.loss + (self.fisher_multiplier / 2) * penalty, var_list=self.theta)
+				return self.optimizer.minimize(self.loss + (self.fisher_multiplier / 2) * penalty + self.reg / 2 * self.l2_loss, var_list=self.all_theta)
 	
 	# restore model with name : model_name
 	def restoreModel(self, sess, model_name):
@@ -168,12 +174,14 @@ class Classifier(object):
 		return loss, loss_with_penalty, accuracy
 
 	# creat feed_dict using batch_xs, batch_ys
-	def createFeedDict(self, batch_xs, batch_ys, learning_rate=None):
+	def createFeedDict(self, batch_xs, batch_ys, learning_rate=None, is_training=False):
 		feed_dict = {self.x: batch_xs, self.y: batch_ys}
 		if learning_rate is not None:
 			feed_dict.update({self.learning_rate : learning_rate})
 		if self.apply_dropout:
 			feed_dict.update({self.keep_prob_hidden: self.dropout_hidden_prob, self.keep_prob_input: self.dropout_input_prob})
+
+		feed_dict.update({self.is_training : is_training})
 		return feed_dict
 
 	# Calculate and update parameter importances (fisher information), given current dataset
@@ -184,7 +192,9 @@ class Classifier(object):
 		# calculate sum of gradient^2 and accumulate in self.new_fisher_diagonal
 		for _ in range(0, num_iters):
 			batch_xs, batch_ys = dataset.nextBatch(sess)
-			sess.run(self.accumulate_squared_gradients, feed_dict={self.x_fisher: batch_xs, self.y_fisher: batch_ys})
+			feed_dict = self.createFeedDict(batch_xs, batch_ys)
+			feed_dict.update({self.keep_prob_hidden: 1.0, self.keep_prob_input: 1.0, self.is_training: False})
+			sess.run(self.accumulate_squared_gradients, feed_dict=feed_dict)
 
 		# average self.new_fisher_diagonal
 		sess.run(self.fisher_full_batch_average_op, feed_dict={self.fisher_average_scale: 1.0 / (num_iters * self.ewc_batch_size)})

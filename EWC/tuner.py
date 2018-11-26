@@ -132,7 +132,12 @@ class HyperparameterTuner(object):
 			self.save_penultimate_output = False
 
 	def getLearningRate(self, base_lr, epoch):
-		return base_lr
+		if (epoch < 49):
+			return base_lr
+		elif (epoch < 63):
+			return base_lr / 5
+		else:
+			return base_lr / 25
 
 	# train on a given task with given hparams - hparams
 	# save every epoch not supported yet
@@ -174,7 +179,7 @@ class HyperparameterTuner(object):
 			# single step of training
 			batch_xs, batch_ys = dataset_train.nextBatch(self.sess)
 			cur_lr = self.getLearningRate(hparams['learning_rate'], epoch)
-			feed_dict = self.classifier.createFeedDict(batch_xs, batch_ys, learning_rate=cur_lr)
+			feed_dict = self.classifier.createFeedDict(batch_xs, batch_ys, learning_rate=cur_lr, is_training=True)
 			cur_loss, cur_loss_with_penalty, cur_accuracy = self.classifier.singleTrainStep(self.sess, feed_dict)
 
 			loss.append(cur_loss)
@@ -421,7 +426,7 @@ class HyperparameterTuner(object):
 				
 				if (old_new_ratio_list is not None):
 					self.setPerExampleAppend(old_new_ratio_list[i])
-					old_new_ratio = self.tuner_hparams['old:new']
+				old_new_ratio = self.tuner_hparams['old:new']
 				if (old_new_ratio > 0):
 					if i == 0:
 						self.appended_task_list[i] = self.task_list[i]
