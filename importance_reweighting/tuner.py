@@ -178,27 +178,30 @@ class HyperparameterTuner(object):
 		# number of examples from all old tasks to append to current task (per example), just before starting to train on it, to avoid forgetting of old tasks
 		# task after appending with examples to train set from old tasks
 		self.appended_task_list = [None for _ in range(self.num_tasks)]
+		self.appended_random_task_list = [None for _ in range(self.num_tasks)]
 		self.tuner_hparams = {'old:new': 2}
 
 		# if some output needs to be used on when that class has been seen in training dataset
 		self.tuner_hparams.update({'mask_softmax': False})
+		self.tuner_hparams.update({'bf_num_images' : 2000})
 
 	# updates self.tuner_hparams dict with provided argument
 	def updateTunerHparams(self, updated_vals):
 		self.tuner_hparams.update(updated_vals)
 
 	# get learning rate for current epoch
-	def getLearningRate(self, base_lr, epoch):
-		if (epoch < 49):
-			return base_lr
-		elif (epoch < 63):
-			return base_lr / 5
-		else:
-			return base_lr / 25
+	def getLearningRate(self, base_lr_list, epoch):
+		for i in range(len(base_lr_list) - 1):
+			if (epoch < base_lr_list[i][0]):
+				return base_lr_list[i][1]
+		
+		return base_lr_list[-1]
 
 	# train on a given task with given hparams - hparams
 	# save every epoch not supported yet
-	def train(self, t, hparams, batch_size, model_init_name, num_updates=-1, verbose=False, random_crop_flip=False, save_weights_every_epoch=False):
+	# only_penultimate_train available only in bf phase
+	def train(self, t, hparams, batch_size, model_init_name, num_updates=-1, verbose=False, random_crop_flip=False, save_weights_every_epoch=False, 
+				is_bf_finetuning_phase=False, only_penultimate_train=False):
 		# make sure hparams has all required hparams for classifier
 		default_hparams = deepcopy(self.default_hparams)
 		default_hparams.update(hparams)
@@ -209,9 +212,12 @@ class HyperparameterTuner(object):
 		model_name = self.fileName(t, hparams, self.tuner_hparams)
 		print("Training with %s" % (model_name, ))
 		# restore model from model_init_name and create train step
-		self.classifier.prepareForTraining(sess=self.sess, 
-											model_name=model_name, 
-											model_init_name=model_init_name)
+
+		if (not is_bf_finetuning_phase):
+			self.classifier.prepareForTraining(sess=self.sess,
+												model_init_name=model_init_name)
+		else:
+			self.classifier.train_step = self.classifier.createTrainStep(self.sess, only_penultimate_train=only_penultimate_train)
 
 		if (self.tuner_hparams['mask_softmax']):
 			self.setScoresMask(t)
@@ -223,11 +229,13 @@ class HyperparameterTuner(object):
 		train_acc = []
 		
 		cur_best_avg = 0.0 											# best weighted average validation accuracy and update number at which it occurs
-		cur_best_avg_num_updates = -1
 		
 		i = 0 														# keeps track of iteration number
 		count_not_improving = 0 									# number of updates for which average validation accuracy isn't improving (starts after some threshold iterations)
-		dataset_train = self.appended_task_list[t].train 			# current task's train, validation datasets
+		if (not is_bf_finetuning_phase):
+			dataset_train = self.appended_task_list[t].train 			# current task's train, validation datasets
+		else:
+			dataset_train = self.appended_random_task_list[t].train
 		dataset_val = self.task_list[t].validation 					
 		dataset_train.initializeIterator(batch_size) 				# set batch_size and pointer to start of dataset
 		dataset_val.initializeIterator(batch_size)
@@ -241,7 +249,14 @@ class HyperparameterTuner(object):
 			batch_xs, batch_ys, batch_weights = dataset_train.nextBatchSample(self.sess, random_crop=random_crop_flip, random_flip=random_crop_flip)
 			if (self.tuner_hparams['mask_softmax']):
 				batch_ys = batch_ys[:, self.active_outputs]
-			cur_lr = self.getLearningRate(hparams['learning_rate'], epoch)
+			# hparams['learning_rate'] = [non_bf_phase, bf_phase]
+				# non_bf_phase = [(epoch1, lr1), (epoch2, lr2), ..., (epoch(n-1), lr(n-1)), lr(n)]
+					# if epoch < epoch(i),  cur_lr = lr(i). Otherwise, cur_lr = lr(n)
+				# bf_phase - same as non_bf_phase
+			if (not is_bf_finetuning_phase):
+				cur_lr = self.getLearningRate(hparams['learning_rate'][0], epoch)
+			else:
+				cur_lr = self.getLearningRate(hparams['learning_rate'][1], epoch)
 			feed_dict = self.classifier.createFeedDict(batch_xs, batch_ys, learning_rate=cur_lr, weights=batch_weights, is_training=True)
 			cur_loss, cur_accuracy = self.classifier.singleTrainStep(self.sess, feed_dict)
 			
@@ -314,6 +329,40 @@ class HyperparameterTuner(object):
 		ret['total_epochs'] = epoch
 		return ret
 
+	def getAppendedRandomTask(self, t):
+		num_elements = self.tuner_hparams['bf_num_images']
+		train_task = self.task_list[t].train
+
+		classes = self.cumulative_split[t]
+		elements_per_class = math.floor(num_elements / len(classes))
+		num_elements = elements_per_class * len(classes)
+
+		appended_images_shape = tuple([num_elements] + list(train_task.images.shape)[1: ])
+		appended_labels_shape = tuple([num_elements] + list(train_task.labels.shape)[1: ])       
+		
+		appended_images = np.empty(appended_images_shape)
+		appended_labels = np.empty(appended_labels_shape)
+		offset = 0
+
+		# TODO : need to take care of case where cur_indices.shape[0] < elements_per_class. Currently sampling with replace, which is actually wrong
+		for i in range(t + 1):
+			for j in range(len(self.split[i])):
+				cur_indices = (np.argmax(self.task_list[i].train.labels, axis=1) == self.split[i][j])
+				cur_images = self.task_list[i].train.images[cur_indices]
+				cur_labels = self.task_list[i].train.labels[cur_indices]
+				if (cur_images.shape[0] >= elements_per_class):
+					sample_indices = np.random.choice(range(cur_images.shape[0]), replace=False, size=elements_per_class)
+				else:
+					sample_indices = np.random.choice(range(cur_images.shape[0]), replace=True, size=elements_per_class)
+				appended_images[offset : offset + elements_per_class] = cur_images[sample_indices]
+				appended_labels[offset : offset + elements_per_class] = cur_labels[sample_indices]
+				offset += elements_per_class
+		
+		appended_random_task = MyTask(self.task_list[t], train_images=appended_images, train_labels=appended_labels)
+
+		return appended_random_task
+
+	
 	# append task with examples from previous tasks
 	def getAppendedTask(self, t, model_init_name, batch_size, optimize_space=False, equal_weights=False, apply_log=False, is_sampling_reweighing=True):
 		appended_task = None
@@ -387,6 +436,7 @@ class HyperparameterTuner(object):
 				
 				appended_task = MyTask(self.task_list[t], train_images=appended_images, train_labels=appended_labels, weights=appended_weights)
 			else:
+				old_new_ratio = int(old_new_ratio)
 				topk_similar = np.argsort(similarity, axis=-1)[:, -old_new_ratio: ]
 				appended_images_shape = tuple([train_task.images.shape[0] * (old_new_ratio + 1)] + list(train_task.images.shape)[1: ])
 				appended_labels_shape = tuple([train_task.labels.shape[0] * (old_new_ratio + 1)] + list(train_task.labels.shape)[1: ])
@@ -402,33 +452,53 @@ class HyperparameterTuner(object):
 						appended_images[offset + j + 1] = self.task_list[index[0]].train.images[index[1]]
 						appended_labels[offset + j + 1] = self.task_list[index[0]].train.labels[index[1]]
 					offset += 1 + old_new_ratio
-
+					
 				appended_task = MyTask(self.task_list[t], appended_images, appended_labels)
 
 		
 		else:
-			train_task = self.task_list[t].train
-			num_elements = 0
-			for i in range(t + 1):
-				num_elements += self.task_list[i].train.images.shape[0]
+			if (is_sampling_reweighing):
+				train_task = self.task_list[t].train
+				num_elements = 0
+				for i in range(t + 1):
+					num_elements += self.task_list[i].train.images.shape[0]
 
-			appended_images_shape = tuple([num_elements] + list(train_task.images.shape)[1: ])
-			appended_labels_shape = tuple([num_elements] + list(train_task.labels.shape)[1: ])
-			appended_weights_shape = tuple([num_elements])            
-			
-			appended_images = np.empty(appended_images_shape)
-			appended_labels = np.empty(appended_labels_shape)
-			appended_weights = np.empty(appended_weights_shape)
+				appended_images_shape = tuple([num_elements] + list(train_task.images.shape)[1: ])
+				appended_labels_shape = tuple([num_elements] + list(train_task.labels.shape)[1: ])
+				appended_weights_shape = tuple([num_elements])            
+				
+				appended_images = np.empty(appended_images_shape)
+				appended_labels = np.empty(appended_labels_shape)
+				appended_weights = np.empty(appended_weights_shape)
 
-			offset = 0
-			for i in range(t + 1):
-				appended_images[offset : offset + self.task_list[i].train.images.shape[0]] = self.task_list[i].train.images
-				appended_labels[offset : offset + self.task_list[i].train.labels.shape[0]] = self.task_list[i].train.labels
-				offset += self.task_list[i].train.images.shape[0]
-			
-			appended_weights[ : ] = 1.0 / num_elements
-			
-			appended_task = MyTask(self.task_list[t], train_images=appended_images, train_labels=appended_labels, weights=appended_weights)
+				offset = 0
+				for i in range(t + 1):
+					appended_images[offset : offset + self.task_list[i].train.images.shape[0]] = self.task_list[i].train.images
+					appended_labels[offset : offset + self.task_list[i].train.labels.shape[0]] = self.task_list[i].train.labels
+					offset += self.task_list[i].train.images.shape[0]
+				
+				appended_weights[ : ] = 1.0 / num_elements
+				appended_task = MyTask(self.task_list[t], train_images=appended_images, train_labels=appended_labels, weights=appended_weights)
+
+			else:
+				train_task = self.task_list[t].train
+				old_new_ratio = self.tuner_hparams['old:new']
+				temp_bf_num_images = self.tuner_hparams['bf_num_images']
+				self.tuner_hparams['bf_num_images'] = self.task_list[t].train.images.shape[0] * old_new_ratio
+				old_task_subset = self.getAppendedRandomTask(t - 1)
+				self.tuner_hparams['bf_num_images'] = temp_bf_num_images
+				appended_images_shape = tuple([train_task.images.shape[0] + old_task_subset.train.images.shape[0]] + list(train_task.images.shape)[1: ])
+				appended_labels_shape = tuple([train_task.images.shape[0] + old_task_subset.train.images.shape[0]] + list(train_task.labels.shape)[1: ])
+				appended_images = np.empty(appended_images_shape)
+				appended_labels = np.empty(appended_labels_shape)
+				offset = 0
+				appended_images[offset : offset + old_task_subset.train.images.shape[0]] = old_task_subset.train.images
+				appended_labels[offset : offset + old_task_subset.train.images.shape[0]] = old_task_subset.train.labels
+				offset += old_task_subset.train.images.shape[0]
+				appended_images[offset : ] = self.task_list[t].train.images
+				appended_labels[offset : ] = self.task_list[t].train.labels
+				
+				appended_task = MyTask(self.task_list[t], train_images=appended_images, train_labels=appended_labels)
 
 		return appended_task
 
@@ -442,7 +512,9 @@ class HyperparameterTuner(object):
 					equal_weights=False, apply_log=False,
 					save_weights_every_epoch=False, save_weights_end=True, 
 					final_train=False, random_crop_flip=False, 
-					is_sampling_reweighing=True):
+					is_sampling_reweighing=True, 
+					do_bf_finetuning=False, num_updates_bf=-1, 
+					bf_only_penultimate_train=False):
 		best_avg = 0.0 								# best average validation accuracy and hparams corresponding to it from self.hparams_list[t]
 		best_hparams = None
 		if model_init_name is None: 				# model with which to initialize weights
@@ -460,6 +532,9 @@ class HyperparameterTuner(object):
 		else:
 			self.appended_task_list[t] = self.task_list[t]
 		
+		if (do_bf_finetuning):
+			self.appended_random_task_list[t] = self.getAppendedRandomTask(t)
+
 		if (not restore_params):
 			model_init_name = None
 
@@ -467,11 +542,23 @@ class HyperparameterTuner(object):
 		for hparams in self.hparams_list[t]:
 			cur_result = self.train(t, hparams, batch_size, model_init_name, num_updates=num_updates, verbose=verbose, random_crop_flip=random_crop_flip, 
 									save_weights_every_epoch=save_weights_every_epoch)
+			cur_result_bf = None
+			if (do_bf_finetuning):
+				cur_result_bf = self.train(t, hparams, batch_size, model_init_name, num_updates=num_updates_bf, verbose=verbose, random_crop_flip=random_crop_flip, 
+											save_weights_every_epoch=save_weights_every_epoch, is_bf_finetuning_phase=True, 
+											only_penultimate_train=bf_only_penultimate_train)
+			
+			cur_result = (cur_result, cur_result_bf)
+			
+
 			if ((save_weights_end or (not final_train)) and (not save_weights_every_epoch)):
-				self.classifier.saveWeights(cur_result['total_updates'], self.sess, self.fileName(t, hparams, self.tuner_hparams))
+				total_updates = cur_result[0]['total_updates']
+				if (do_bf_finetuning):
+					total_updates += cur_result[1]['total_updates']
+				self.classifier.saveWeights(total_updates, self.sess, self.fileName(t, hparams, self.tuner_hparams))
 			self.saveResults(cur_result, self.fileName(t, hparams, self.tuner_hparams))
 			
-			cur_best_avg = cur_result['best_avg']
+			cur_best_avg = cur_result[1]['best_avg'] if cur_result[1] is not None else cur_result[0]['best_avg']
 			hparams_tuple = self.hparamsDictToTuple(hparams, self.tuner_hparams)
 			self.results_list[t][hparams_tuple] = cur_result
 			
@@ -489,6 +576,7 @@ class HyperparameterTuner(object):
 				self.best_hparams[t] = (best_hparams, self.tuner_hparams, self.fileName(t, best_hparams, self.tuner_hparams))
 
 		# retrain model for best_avg_updates for best hparam to get optimal validation accuracy
+		# TODO : Currently finetuning doesn't work with final_train ; ie early stopping
 		if final_train:
 			best_hparams_tuple = self.hparamsDictToTuple(best_hparams, self.tuner_hparams)
 			cur_result = self.train(t, best_hparams, batch_size, model_init_name,
@@ -528,7 +616,9 @@ class HyperparameterTuner(object):
 	# train on a range of tasks sequentially [start, end] with different hparams ; currently only positive num_updates allowed
 	def tuneTasksInRange(self, start, end, batch_size, num_hparams, num_updates=0, verbose=False, equal_weights=False, restore_params=True, 
 							apply_log=False, random_crop_flip=False, early_stop=False, 
-							old_new_ratio_list=None, is_sampling_reweighing=True):
+							old_new_ratio_list=None, is_sampling_reweighing=True, 
+							do_bf_finetuning=False, num_updates_bf=-1, 
+							bf_only_penultimate_train=False):
 		if (num_updates < 0):
 			print("bad num_updates argument.. stopping")
 			return 0, self.hparams_list[start][0]
@@ -561,16 +651,31 @@ class HyperparameterTuner(object):
 				if (not restore_params):
 					model_init_name = None
 
+				if (do_bf_finetuning):
+					self.appended_random_task_list[i] = self.getAppendedRandomTask(i)
+
 				hparams = self.hparams_list[i][k]
 				cur_result = self.train(i, hparams, batch_size, model_init_name, num_updates=num_updates, verbose=verbose, 
 										random_crop_flip=random_crop_flip)
+				
+				cur_result_1 = None
+				if (do_bf_finetuning):
+					cur_result_1 = self.train(i, hparams, batch_size, model_init_name, num_updates=num_updates_bf, verbose=verbose, 
+												random_crop_flip=random_crop_flip, 
+												is_bf_finetuning_phase=True, only_penultimate_train=bf_only_penultimate_train)
+
+				cur_result = (cur_result, cur_result_1)
 				if (not early_stop):
-					self.classifier.saveWeights(cur_result['total_updates'], self.sess, self.fileName(i, hparams, self.tuner_hparams))
+					total_updates = cur_result[0]['total_updates']
+					if (do_bf_finetuning):
+						total_updates += cur_result[1]['total_updates']
+					self.classifier.saveWeights(total_updates, self.sess, self.fileName(i, hparams, self.tuner_hparams))
 				
 				self.saveResults(cur_result, self.fileName(i, hparams, self.tuner_hparams))
 				hparams_tuple = self.hparamsDictToTuple(hparams, self.tuner_hparams)
 				self.results_list[i][hparams_tuple] = cur_result
 
+				# TODO : early stop doesn't work for bf case
 				if early_stop:
 					cur_result = self.train(i, hparams, batch_size, model_init_name,
 									num_updates=self.results_list[i][hparams_tuple]['best_epoch'] * self.results_list[i][hparams_tuple]['updates_per_epoch'], 
@@ -578,7 +683,8 @@ class HyperparameterTuner(object):
 					self.classifier.saveWeights(self.results_list[i][hparams_tuple]['best_epoch'] * self.results_list[i][hparams_tuple]['updates_per_epoch'], 
 													self.sess, self.fileName(i, hparams, self.tuner_hparams))
 
-				cur_best_avg = self.results_list[i][hparams_tuple]['best_avg']
+				cur_best_avg = self.results_list[i][hparams_tuple][1]['best_avg'] if self.results_list[i][hparams_tuple][1] is not None else \
+								self.results_list[i][hparams_tuple][0]['best_avg']
 
 				if (self.save_penultimate_output):
 					print("calculating penultimate output...")
@@ -760,6 +866,9 @@ class HyperparameterTuner(object):
 	def fileName(self, t, hparams, tuner_hparams=None):
 		model_name = ''
 		for k, v in sorted(hparams.items()):
+			if (k == 'learning_rate'):
+				model_name += str(k) + '=' + 'too_long' + ','
+				continue
 			model_name += str(k) + '=' + str(v) + ','
 
 		if tuner_hparams is not None:

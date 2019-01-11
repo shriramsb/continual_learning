@@ -37,7 +37,7 @@ class Classifier(object):
 		self.scores, self.layer_output = self.network.forward(self.x, self.apply_dropout, self.keep_prob_input, self.keep_prob_hidden, is_training=self.is_training)
 
 		self.all_theta = [v for v in tf.trainable_variables()]
-		self.theta = None                       # list of tf trainable variables used to hold values of current task
+		self.theta = self.all_theta           	# list of tf trainable variables used to hold values of current task
 		self.theta_lagged = None                # list of tf trainable variables used to hold values of previous task
 		self.fisher_diagonal = None             # list of tf variable having importance of each variable
 		self.createFisherDiagonal()             # create tf variables - fisher

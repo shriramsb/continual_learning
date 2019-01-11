@@ -86,8 +86,8 @@ class Classifier(object):
 			self.accuracy = accuracy
 
 	# setup train step ; to be called just before start of training
-	def prepareForTraining(self, sess, model_name, model_init_name):
-		self.train_step = self.createTrainStep()
+	def prepareForTraining(self, sess, model_init_name, only_penultimate_train=False):
+		self.train_step = self.createTrainStep(sess, only_penultimate_train)
 		init = tf.global_variables_initializer()
 		sess.run(init)
 		if model_init_name:
@@ -95,12 +95,19 @@ class Classifier(object):
 			self.restoreModel(sess, model_init_name)
 	
 	# create optimizer, loss function for training
-	def createTrainStep(self):
+	def createTrainStep(self, sess, only_penultimate_train=False):
 		with tf.name_scope("optimizer"):
 			self.optimizer = tf.train.MomentumOptimizer(learning_rate=self.learning_rate, momentum=self.momentum)
 			update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
 			with tf.control_dependencies(update_ops):
-				return self.optimizer.minimize(self.loss + self.reg / 2 * self.l2_loss, var_list=self.theta)
+				if (not only_penultimate_train):
+					ret_val = self.optimizer.minimize(self.loss + self.reg / 2 * self.l2_loss, var_list=self.theta)
+				else:
+					ret_val = self.optimizer.minimize(self.loss + self.reg / 2 * self.l2_loss, var_list=self.network.getPenultimateLayerVariables())
+		init_optimizer_op = tf.initializers.variables(self.optimizer.variables())
+		sess.run(init_optimizer_op)
+		return ret_val
+		
 	
 	# restore model with name : model_name
 	def restoreModel(self, sess, model_name):

@@ -54,51 +54,52 @@ class Network(object):
 		pass
 
 	def forward(self, x, apply_dropout, keep_prob_input=1.0, keep_prob_hidden=1.0, is_training=False):
-		layer_output = []
-		
-		y = x
-		
-		y = tf.layers.batch_normalization(tf.layers.conv2d(y, filters=16, kernel_size=(3, 3), strides=(1, 1), padding='same', use_bias=False), training=is_training, momentum=self.bn_momentum, epsilon=self.bn_eps)
-		y = tf.nn.relu(y)
-		layer_output.append(y)
-
-		# first stack 32 x 32 x 16
-		for _ in range(self.num_residual_blocks):
-			y = self.residualBlock(y, is_training=is_training)
+		with tf.variable_scope('resnet_layers'):
+			layer_output = []
+			
+			y = x
+			
+			y = tf.layers.batch_normalization(tf.layers.conv2d(y, filters=16, kernel_size=(3, 3), strides=(1, 1), padding='same', use_bias=False), training=is_training, momentum=self.bn_momentum, epsilon=self.bn_eps)
+			y = tf.nn.relu(y)
 			layer_output.append(y)
 
-		# second stack 16 x 16 x 32
-		y = self.residualBlock(y, is_training=is_training, increase_dim=True, projection=True)
-		layer_output.append(y)
-		for _ in range(1, self.num_residual_blocks):
-			y = self.residualBlock(y, is_training=is_training)
+			# first stack 32 x 32 x 16
+			for _ in range(self.num_residual_blocks):
+				y = self.residualBlock(y, is_training=is_training)
+				layer_output.append(y)
+
+			# second stack 16 x 16 x 32
+			y = self.residualBlock(y, is_training=is_training, increase_dim=True, projection=True)
+			layer_output.append(y)
+			for _ in range(1, self.num_residual_blocks):
+				y = self.residualBlock(y, is_training=is_training)
+				layer_output.append(y)
+
+			# third stack 8 x 8 x 64
+			y = self.residualBlock(y, is_training=is_training, increase_dim=True, projection=True)
+			layer_output.append(y)
+			for _ in range(1, self.num_residual_blocks - 1):
+				y = self.residualBlock(y, is_training=is_training)
+				layer_output.append(y)
+
+			y = self.residualBlock(y, is_training=is_training, last=False) 			# edit me! set last=True
 			layer_output.append(y)
 
-		# third stack 8 x 8 x 64
-		y = self.residualBlock(y, is_training=is_training, increase_dim=True, projection=True)
-		layer_output.append(y)
-		for _ in range(1, self.num_residual_blocks - 1):
-			y = self.residualBlock(y, is_training=is_training)
+			# global average pooling
+			y = tf.reduce_mean(y, axis=[1, 2])
 			layer_output.append(y)
 
-		y = self.residualBlock(y, is_training=is_training, last=False) 			# edit me! set last=True
-		layer_output.append(y)
-
-		# global average pooling
-		y = tf.reduce_mean(y, axis=[1, 2])
-		layer_output.append(y)
-
-		y = tf.layers.dense(y, units=100)
-		layer_output.append(y)
-		
-		return y, layer_output
+			y = tf.layers.dense(y, units=100)
+			layer_output.append(y)
+			
+			return y, layer_output
 
 	def getLayerVariables(self):
 		# l = []
 		# for i in range(len(self.layers)):
 		# 	l.extend(self.layers[i].variables)
 		# return l
-		return None
+		return [v for v in tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='resnet_layers')]
 
 	def name(self):
 		return 'n1'
