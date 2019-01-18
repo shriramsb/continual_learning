@@ -38,6 +38,38 @@ def getLossAccuracyOnDataset(network, dataset_loader, fast_device, criterion=Non
 	network.is_training = True
 	return loss, accuracy
 
+def getConfusionMatrix(network, dataset_loader, fast_device, num_class):
+	"""
+	Return: Confusion matrix of network's prediction on given dataset
+	"""
+	network.is_training = False
+	confusion_matrix = [[0 for _ in range(num_class)] for _ in range(num_class)]
+	dataset_size = 0
+	for j, D in enumerate(dataset_loader, 0):
+		X, y = D
+		X = X.to(fast_device)
+		with torch.no_grad():
+			pred = network(X)
+			pred = torch.argmax(pred, dim=1)
+			pred = pred.cpu()
+			pred = pred.numpy()
+			y = y.numpy()
+			for i in range(y.shape[0]):
+				confusion_matrix[y[i]][pred[i]] += 1
+	return confusion_matrix
+
+def printConfusionMatrix(confusion_matrix):
+	num_class = len(confusion_matrix)
+	print('%3d ' %(-1, ), end='')
+	for i in range(num_class):
+		print('%3d ' %(i, ), end='')
+	print('')
+	for i in range(num_class):
+		print('%3d ' % (i, ), end='')
+		for j in range(num_class):
+			print('%3d ' % (confusion_matrix[i][j], ), end='')
+		print('')
+
 def trainTeacherOnHparam(teacher_net, hparam, num_epochs, 
 						train_loader, val_loader, 
 						print_every=0, 
@@ -101,7 +133,8 @@ def studentTrainStep(teacher_net, student_net, studentLossFn, optimizer, X, y, T
 def trainStudentOnHparam(teacher_net, student_net, hparam, num_epochs, 
 						train_loader, val_loader, 
 						print_every=0, 
-						fast_device=torch.device('cpu')):
+						fast_device=torch.device('cpu'), 
+						only_penultimate_train=False):
 	"""
 	Trains teacher on given hyperparameters for given number of epochs; Pass val_loader=None when not required to validate for every epoch
 	Return: List of training loss, accuracy for each update calculated only on the batch; List of validation loss, accuracy for each epoch
@@ -111,7 +144,13 @@ def trainStudentOnHparam(teacher_net, student_net, hparam, num_epochs,
 	alpha = hparam['alpha']
 	student_net.dropout_input = hparam['dropout_input']
 	student_net.dropout_hidden = hparam['dropout_hidden']
-	optimizer = optim.SGD(student_net.parameters(), lr=hparam['lr'], momentum=hparam['momentum'], weight_decay=hparam['weight_decay'])
+	if (only_penultimate_train):
+		for param in student_net.parameters():
+			param.requires_grad_(False)
+		student_net.all_layers[-1].weight.requires_grad_(True)
+		student_net.all_layers[-1].bias.requires_grad_(True)
+
+	optimizer = optim.SGD(filter(lambda p: p.requires_grad, student_net.parameters()), lr=hparam['lr'], momentum=hparam['momentum'], weight_decay=hparam['weight_decay'])
 	lr_scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=hparam['lr_decay'])
 
 	def studentLossFn(teacher_pred, student_pred, y, T, alpha):
@@ -147,6 +186,11 @@ def trainStudentOnHparam(teacher_net, student_net, hparam, num_epochs,
 			_, val_acc = getLossAccuracyOnDataset(student_net, val_loader, fast_device)
 			val_acc_list.append(val_acc)
 			print('epoch: %d validation accuracy: %.3f' %(epoch + 1, val_acc))
+
+	if (only_penultimate_train):
+		for param in student_net.parameters():
+			param.requires_grad_(True)
+
 	return {'train_loss': train_loss_list, 
 			'train_acc': train_acc_list, 
 			'val_acc': val_acc_list}
