@@ -28,6 +28,11 @@ class Classifier(object):
 		self.scores_mask_assign_op = None 		# tf operation to assign scores_mask
 		self.createScoresMask() 				# creates above objects for masking
 
+		self.distill_mask = None 				# tf variable storing mask
+		self.distill_mask_placeholder = None 	# tf placeholder to assign self.distill_mask
+		self.distill_mask_assign_op = None 		# tf operation to assign scores_mask
+		self.createDistillMask() 				# creates above objects for masking
+
 		# hyperparameters
 		# self.learning_rate = None
 		self.momentum = 0.9
@@ -39,6 +44,7 @@ class Classifier(object):
 		self.network = network 					# Network object
 		# feed-forward for training inputs
 		self.scores, self.layer_output = self.network.forward(self.x, self.apply_dropout, self.keep_prob_input, self.keep_prob_hidden, is_training=self.is_training)
+		self.scores_distill = tf.boolean_mask(self.scores, self.distill_mask, axis=1) 	# mask scores to get previous task's classes' scores
 		self.scores = tf.boolean_mask(self.scores, self.scores_mask, axis=1) 	# mask scores to remove unassigned class's scores
 
 		self.theta = self.network.getLayerVariables() 		# list of tf trainable variables used to hold values of current task
@@ -64,25 +70,44 @@ class Classifier(object):
 			self.learning_rate = tf.placeholder(tf.float32, [])
 		
 		self.is_training = tf.placeholder(tf.bool, [])
+		self.teacher_outputs = tf.placeholder(tf.float32, [None] + [None for _ in range(len(self.output_shape))])
 
 	# creates self.scores_mask, op to assign it ; default mask set to using all outputs
 	def createScoresMask(self):
 		self.scores_mask = tf.Variable(np.ones(self.output_shape, dtype=np.bool), trainable=False)
 		self.scores_mask_placeholder = tf.placeholder(tf.bool, shape=list(self.output_shape))
 		self.scores_mask_assign = tf.assign(self.scores_mask, self.scores_mask_placeholder)
+
+	# creates self.scores_mask, op to assign it ; default mask set to using all outputs
+	def createDistillMask(self):
+		self.distill_mask = tf.Variable(np.ones(self.output_shape, dtype=np.bool), trainable=False)
+		self.distill_mask_placeholder = tf.placeholder(tf.bool, shape=list(self.output_shape))
+		self.distill_mask_assign = tf.assign(self.distill_mask, self.distill_mask_placeholder)
 	
 	def setScoresMask(self, sess, mask):
 		sess.run(self.scores_mask_assign, feed_dict={self.scores_mask_placeholder: mask})
 
+	def setDistillMask(self, sess, mask):
+		sess.run(self.distill_mask_assign, feed_dict={self.distill_mask_placeholder: mask})
+
 	# create computation graph for loss and accuracy
-	def createLossAccuracy(self, reweigh_points_loss):
+	def createLossAccuracy(self, reweigh_points_loss, use_distill=False, T=None, alpha=None):
 		with tf.name_scope("loss"):
 			# improve : try just softmax_cross_entropy instead of sotmax_cross_entropy_with_logits?
 			if (reweigh_points_loss):
 				average_nll = tf.reduce_sum(self.loss_weights * tf.nn.softmax_cross_entropy_with_logits(logits=self.scores, labels=self.y)) / tf.reduce_sum(self.loss_weights)
 			else:
 				average_nll = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits=self.scores, labels=self.y))
-			self.loss = average_nll
+
+			if use_distill:
+				student_log_prob_old = tf.nn.log_softmax(self.scores_distill / T)
+				teacher_prob_old = tf.nn.softmax(self.teacher_outputs / T)
+				distill_loss = -1 * tf.reduce_mean(tf.reduce_sum(student_log_prob_old * teacher_prob_old, axis=-1))
+
+			if not use_distill:
+				self.loss = average_nll
+			else:
+				self.loss = (1 - alpha) * average_nll + alpha * (T ** 2) * distill_loss
 			self.l2_loss = tf.add_n([tf.nn.l2_loss(v) for v in tf.trainable_variables() if ('bias' not in v.name and 'batch' not in v.name)])
 		with tf.name_scope('accuracy'):
 			accuracy = tf.reduce_mean(tf.cast(tf.equal(tf.argmax(self.scores, 1), tf.argmax(self.y, 1)), tf.float32))
@@ -145,7 +170,7 @@ class Classifier(object):
 		return loss, accuracy
 
 	# creat feed_dict using batch_xs, batch_ys
-	def createFeedDict(self, batch_xs, batch_ys, learning_rate=None, weights=None, is_training=False):
+	def createFeedDict(self, batch_xs, batch_ys, learning_rate=None, weights=None, is_training=False, teacher_outputs=None):
 		if weights is None:
 			weights = np.array([1 for _ in range(batch_xs.shape[0])])
 		feed_dict = {self.x: batch_xs, self.y: batch_ys, self.loss_weights: weights}
@@ -154,6 +179,8 @@ class Classifier(object):
 		if self.apply_dropout:
 			feed_dict.update({self.keep_prob_hidden: self.dropout_hidden_prob, self.keep_prob_input: self.dropout_input_prob})
 		feed_dict.update({self.is_training: is_training})
+		if (teacher_outputs is not None):
+			feed_dict.update({self.teacher_outputs: teacher_outputs})
 		return feed_dict
 
 	# set hyperparamters
@@ -166,6 +193,6 @@ class Classifier(object):
 			setattr(self, k, v)
 
 	# get output of layer just before logits
-	def getPenultimateOutput(self, sess, feed_dict):
-		penultimate_output = sess.run(self.layer_output[-2], feed_dict=feed_dict)
+	def getLayerOutput(self, sess, feed_dict, index):
+		penultimate_output = sess.run(self.layer_output[index], feed_dict=feed_dict)
 		return penultimate_output

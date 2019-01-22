@@ -35,6 +35,8 @@ class MyDataset(object):
 			self.weights = weights
 		self.pos = 0                             	# pointer storing position starting from which to return data for nextBatch()
 
+		self.final_outputs = None
+
 	# modify batch size and position pointer to the start of dataset 
 	def initializeIterator(self, batch_size):
 		self.batch_size = batch_size
@@ -85,6 +87,10 @@ class MyDataset(object):
 			batch_weights = 1.0 / self.weights[sampled_indices]             # calculate inverse of weights of samples to reweigh them in loss function
 		batch_xs = self.images[sampled_indices]
 		batch_ys = self.labels[sampled_indices]
+		if self.final_outputs is not None:
+			batch_final_outputs = self.final_outputs[sampled_indices]
+		else:
+			batch_final_outputs = None
 
 		if random_flip:
 			for i in range(batch_xs.shape[0]):
@@ -96,7 +102,7 @@ class MyDataset(object):
 				if (np.random.random() < 0.5):
 					batch_xs[i] = self.randomCrop(batch_xs[i], 4) 	# 4 - hard-coded
 
-		return batch_xs, batch_ys, batch_weights
+		return batch_xs, batch_ys, batch_weights, batch_final_outputs
 
 	# get data in [start, end)
 	def getData(self, start, end):
@@ -124,6 +130,9 @@ class MyTask(object):
 				self.train = MyDataset(train_images, train_labels, weights)
 				self.validation = MyDataset(task.validation.images, task.validation.labels)
 				self.test = MyDataset(task.test.images, task.test.labels)
+
+	def loadFinalOutput(self, final_output):
+		self.train.final_outputs = final_output
 
 # Helps in tuning hyperparameters of classifer (network) on different tasks
 class HyperparameterTuner(object):
@@ -158,7 +167,9 @@ class HyperparameterTuner(object):
 		self.hparams_list = [[] for _ in range(self.num_tasks)] 	# list of hparams for each task to tune on
 		self.default_hparams = {'learning_rate': 5e-6, 'fisher_multiplier': 0.0,  		# default values of hparams
 								'dropout_input_prob': 1.0, 'dropout_hidden_prob': 1.0, 
-								'epsilon': 0.0}
+								'epsilon': 0.0, 
+								'T': None, 
+								'alpha': 0.0}
 		self.num_tolerate_epochs = 2 							# number of epochs to wait if validation accuracy isn't improving
 		self.eval_frequency = 1 								# frequency of calculation of validation accuracy
 		self.print_every = 1000 								# frequency of printing, if verbose during training
@@ -192,6 +203,8 @@ class HyperparameterTuner(object):
 		self.tuner_hparams.update({'mask_softmax': False})
 		self.tuner_hparams.update({'bf_num_images' : 2000})
 
+		self.reweigh_points_loss = reweigh_points_loss
+
 	# updates self.tuner_hparams dict with provided argument
 	def updateTunerHparams(self, updated_vals):
 		self.tuner_hparams.update(updated_vals)
@@ -214,6 +227,11 @@ class HyperparameterTuner(object):
 		default_hparams.update(hparams)
 		hparams = default_hparams
 		self.classifier.updateHparams(hparams)
+
+		use_distill = t > 0 and (hparams['T'] is not None) and (not is_bf_finetuning_phase)
+		if (use_distill):
+			self.setDistillMask(t - 1)
+			self.classifier.createLossAccuracy(self.reweigh_points_loss, use_distill=True, T=hparams['T'], alpha=hparams['alpha'])
 		
 		# model_name depending on current hparams
 		model_name = self.fileName(t, hparams, self.tuner_hparams)
@@ -253,7 +271,7 @@ class HyperparameterTuner(object):
 		# training loop
 		while (True):
 			# single step of training
-			batch_xs, batch_ys, batch_weights = dataset_train.nextBatchSample(self.sess, random_crop=random_crop_flip, random_flip=random_crop_flip, epsilon=hparams['epsilon'])
+			batch_xs, batch_ys, batch_weights, batch_final_outputs = dataset_train.nextBatchSample(self.sess, random_crop=random_crop_flip, random_flip=random_crop_flip, epsilon=hparams['epsilon'])
 			if (self.tuner_hparams['mask_softmax']):
 				batch_ys = batch_ys[:, self.active_outputs]
 			# hparams['learning_rate'] = [non_bf_phase, bf_phase]
@@ -264,7 +282,12 @@ class HyperparameterTuner(object):
 				cur_lr = self.getLearningRate(hparams['learning_rate'][0], epoch)
 			else:
 				cur_lr = self.getLearningRate(hparams['learning_rate'][1], epoch)
-			feed_dict = self.classifier.createFeedDict(batch_xs, batch_ys, learning_rate=cur_lr, weights=batch_weights, is_training=True)
+
+			if (not use_distill):
+				feed_dict = self.classifier.createFeedDict(batch_xs, batch_ys, learning_rate=cur_lr, weights=batch_weights, is_training=True)
+			else:
+				feed_dict = self.classifier.createFeedDict(batch_xs, batch_ys, learning_rate=cur_lr, weights=batch_weights, is_training=True, 
+															teacher_outputs=batch_final_outputs)
 			cur_loss, cur_accuracy = self.classifier.singleTrainStep(self.sess, feed_dict)
 			
 			loss.append(cur_loss)
@@ -385,7 +408,7 @@ class HyperparameterTuner(object):
 				old_penultimate_output, old_taskid_offset = pickle.load(f)
 			
 			# penultimate output of current task for model_init_name
-			cur_penultimate_output, _ = self.getPenultimateOutput(t, batch_size)
+			cur_penultimate_output, _ = self.getLayerOutput(t, batch_size, -2)
 
 			# norm of vectors for cosine similarity
 			cur_penultimate_output_norm = np.sqrt(np.sum((cur_penultimate_output ** 2), axis=1))
@@ -510,6 +533,9 @@ class HyperparameterTuner(object):
 				
 				appended_task = MyTask(self.task_list[t], train_images=appended_images, train_labels=appended_labels)
 
+		with open(self.checkpoint_path + model_init_name + '_final_output.txt', 'rb') as f:
+			old_final_output, old_taskid_offset = pickle.load(f)
+		appended_task.loadFinalOutput(old_final_output)
 		return appended_task
 
 	def hparamsDictToTuple(self, hparams, tuner_hparams):
@@ -602,13 +628,8 @@ class HyperparameterTuner(object):
 
 		# calculate penultimate output of all tasks till 't' and save to file
 		if (self.save_penultimate_output):
-			print("calculating penultimate output...")
-			start_time = time.time()
-			penultimate_output, taskid_offset = self.getAllPenultimateOutput(t, batch_size)
-			print("time taken: %f", time.time() - start_time)
-			print("saving penultimate output...")
-			with open(self.checkpoint_path + self.fileName(t, best_hparams, self.tuner_hparams) + '_penultimate_output.txt', 'wb') as f:
-				pickle.dump((penultimate_output, taskid_offset), f)
+			self.savePenultimateOutput(t, batch_size, hparams)
+			self.saveFinalOutput(t, batch_size, hparams)
 
 		return best_avg, best_hparams
 
@@ -627,6 +648,13 @@ class HyperparameterTuner(object):
 		active_outputs_bool[active_outputs] = True
 		self.classifier.setScoresMask(self.sess, active_outputs_bool)
 		self.active_outputs = self.cumulative_split[task]
+
+	def setDistillMask(self, task):
+		active_outputs = self.cumulative_split[task]
+		active_outputs_bool = np.zeros(self.output_shape[0], dtype=np.bool)
+		active_outputs_bool[active_outputs] = True
+		self.classifier.setDsitillMask(self.sess, active_outputs_bool)
+		self.distill_active_outputs = self.cumulative_split[task]		
 
 	# train on a range of tasks sequentially [start, end] with different hparams ; currently only positive num_updates allowed
 	def tuneTasksInRange(self, start, end, batch_size, num_hparams, num_updates=0, verbose=False, equal_weights=False, restore_params=True, 
@@ -703,13 +731,9 @@ class HyperparameterTuner(object):
 								self.results_list[i][hparams_tuple][0]['best_avg']
 
 				if (self.save_penultimate_output):
-					print("calculating penultimate output...")
-					start_time = time.time()
-					penultimate_output, taskid_offset = self.getAllPenultimateOutput(i, batch_size)
-					print("time taken: %f", time.time() - start_time)
-					print("saving penultimate output...")
-					with open(self.checkpoint_path + self.fileName(i, hparams, self.tuner_hparams) + '_penultimate_output.txt', 'wb') as f:
-						pickle.dump((penultimate_output, taskid_offset), f)
+					self.savePenultimateOutput(i, batch_size, hparams)
+					self.saveFinalOutput(i, batch_size, hparams)
+
 
 			if (cur_best_avg > best_avg):
 				best_avg = cur_best_avg
@@ -722,8 +746,27 @@ class HyperparameterTuner(object):
 
 		return best_avg, best_hparams_index
 
+
+	def savePenultimateOutput(i ,batch_size, hparams):
+		print("calculating penultimate output...")
+		start_time = time.time()
+		penultimate_output, taskid_offset = self.getAllLayerOutput(i, batch_size, -2)
+		print("time taken: %f", time.time() - start_time)
+		print("saving penultimate output...")
+		with open(self.checkpoint_path + self.fileName(i, hparams, self.tuner_hparams) + '_penultimate_output.txt', 'wb') as f:
+			pickle.dump((penultimate_output, taskid_offset), f)
+
+	def saveFinalOutput(i ,batch_size, hparams):
+		print("calculating final output...")
+		start_time = time.time()
+		final_output, taskid_offset = self.getAllLayerOutput(i, batch_size, -1)
+		print("time taken: %f", time.time() - start_time)
+		print("saving final output...")
+		with open(self.checkpoint_path + self.fileName(i, hparams, self.tuner_hparams) + '_final_output.txt', 'wb') as f:
+			pickle.dump((final_output, taskid_offset), f)
+
 	# get penultimate output of all layers till 't' using current parameters of network
-	def getAllPenultimateOutput(self, t, batch_size):
+	def getAllLayerOutput(self, t, batch_size, layer_index):
 		total_elements = sum([task.train.images.shape[0] for task in self.task_list[0: t + 1]])
 		penultimate_output_size = int(self.classifier.layer_output[-2].shape[-1])
 		penultimate_output = np.empty(shape=(total_elements, penultimate_output_size))
@@ -731,7 +774,7 @@ class HyperparameterTuner(object):
 		offset = 0
 		for i in range(t + 1):
 			cur_num_elements = self.task_list[i].train.images.shape[0]
-			cur_penultimate_output, cur_taskid_offset = self.getPenultimateOutput(i, batch_size)
+			cur_penultimate_output, cur_taskid_offset = self.getLayerOutput(i, batch_size, layer_index)
 			penultimate_output[offset: offset + cur_num_elements, :] = cur_penultimate_output
 			taskid_offset[offset: offset + cur_num_elements] = cur_taskid_offset
 			offset += cur_num_elements            
@@ -739,7 +782,7 @@ class HyperparameterTuner(object):
 		return penultimate_output, taskid_offset
 	
 	# get penultimate output for task 't' using current parameters of network
-	def getPenultimateOutput(self, t, batch_size):
+	def getLayerOutput(self, t, batch_size, layer_index):
 		num_elements = self.task_list[t].train.images.shape[0]
 		penultimate_output_size = int(self.classifier.layer_output[-2].shape[-1])
 		penultimate_output = np.empty(shape=(num_elements, penultimate_output_size))
@@ -750,7 +793,7 @@ class HyperparameterTuner(object):
 		for j in range(num_batches):
 			batch_xs, batch_ys = self.task_list[t].train.getData(j * batch_size, (j + 1) * batch_size)
 			feed_dict = self.classifier.createFeedDict(batch_xs, batch_ys)
-			cur_penultimate_output = self.classifier.getPenultimateOutput(self.sess, feed_dict)
+			cur_penultimate_output = self.classifier.getLayerOutput(self.sess, feed_dict, layer_index)
 			penultimate_output[offset: offset + batch_size, :] = cur_penultimate_output
 			taskid_offset[offset: offset + batch_size, 0] = np.full((batch_size, ), t)
 			taskid_offset[offset: offset + batch_size, 1] = np.arange(j * batch_size, (j + 1) * batch_size)
@@ -760,7 +803,7 @@ class HyperparameterTuner(object):
 			num_remaining = self.task_list[t].train.images.shape[0] % batch_size
 			batch_xs, batch_ys = self.task_list[t].train.getData(j * batch_size, j * batch_size + num_remaining)
 			feed_dict = self.classifier.createFeedDict(batch_xs, batch_ys)
-			cur_penultimate_output = self.classifier.getPenultimateOutput(self.sess, feed_dict)
+			cur_penultimate_output = self.classifier.getLayerOutput(self.sess, feed_dict, layer_index)
 			penultimate_output[offset: offset + num_remaining, :] = cur_penultimate_output
 			taskid_offset[offset: offset + num_remaining, 0] = np.full((num_remaining, ), t)
 			taskid_offset[offset: offset + num_remaining, 1] = np.arange(j * batch_size, j * batch_size + num_remaining)
