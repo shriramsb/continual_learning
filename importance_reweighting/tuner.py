@@ -74,12 +74,17 @@ class MyDataset(object):
 		return padded_image
 
 	# sample next batch according to weights
-	def nextBatchSample(self, sess, random_flip=False, random_crop=False):
+	# with epsilon probability, samples uniformly
+	def nextBatchSample(self, sess, random_flip=False, random_crop=False, epsilon=0.0):
 		total_examples = self.images.shape[0]
-		sampled_indices = np.random.choice(range(total_examples), p = self.weights, size=self.batch_size)
+		if (np.random.rand() < epsilon):
+			sampled_indices = np.random.choice(range(total_examples), size=self.batch_size)
+			batch_weights = np.ones(self.batch_size)
+		else:
+			sampled_indices = np.random.choice(range(total_examples), p = self.weights, size=self.batch_size)
+			batch_weights = 1.0 / self.weights[sampled_indices]             # calculate inverse of weights of samples to reweigh them in loss function
 		batch_xs = self.images[sampled_indices]
 		batch_ys = self.labels[sampled_indices]
-		batch_weights = 1.0 / self.weights[sampled_indices]             # calculate inverse of weights of samples to reweigh them in loss function
 
 		if random_flip:
 			for i in range(batch_xs.shape[0]):
@@ -125,7 +130,8 @@ class HyperparameterTuner(object):
 	def __init__(self, sess, network, input_shape, output_shape, 
 				checkpoint_path, summaries_path,
 				readDatasets, 
-				load_best_hparams=False):
+				load_best_hparams=False, 
+				reweigh_points_loss=True):
 		
 		self.sess = sess                                            # tf session
 		self.input_shape = input_shape                              # input shape to network
@@ -151,7 +157,8 @@ class HyperparameterTuner(object):
 		self.results_list = [{} for _ in range(self.num_tasks)] 	# results (list of loss, accuracy) for each task, hparam
 		self.hparams_list = [[] for _ in range(self.num_tasks)] 	# list of hparams for each task to tune on
 		self.default_hparams = {'learning_rate': 5e-6, 'fisher_multiplier': 0.0,  		# default values of hparams
-								'dropout_input_prob': 1.0, 'dropout_hidden_prob': 1.0}
+								'dropout_input_prob': 1.0, 'dropout_hidden_prob': 1.0, 
+								'epsilon': 0.0}
 		self.num_tolerate_epochs = 2 							# number of epochs to wait if validation accuracy isn't improving
 		self.eval_frequency = 1 								# frequency of calculation of validation accuracy
 		self.print_every = 1000 								# frequency of printing, if verbose during training
@@ -170,7 +177,7 @@ class HyperparameterTuner(object):
 				self.best_hparams = pickle.load(fp)
 
 		# classifier object
-		self.classifier = Classifier(network, input_shape, output_shape, checkpoint_path)
+		self.classifier = Classifier(network, input_shape, output_shape, checkpoint_path, reweigh_points_loss)
 
 		self.use_gpu = True 											# if use gpu for matrix multiplication - uses PyTorch for mm			
 
@@ -246,7 +253,7 @@ class HyperparameterTuner(object):
 		# training loop
 		while (True):
 			# single step of training
-			batch_xs, batch_ys, batch_weights = dataset_train.nextBatchSample(self.sess, random_crop=random_crop_flip, random_flip=random_crop_flip)
+			batch_xs, batch_ys, batch_weights = dataset_train.nextBatchSample(self.sess, random_crop=random_crop_flip, random_flip=random_crop_flip, epsilon=hparams['epsilon'])
 			if (self.tuner_hparams['mask_softmax']):
 				batch_ys = batch_ys[:, self.active_outputs]
 			# hparams['learning_rate'] = [non_bf_phase, bf_phase]
@@ -364,7 +371,8 @@ class HyperparameterTuner(object):
 
 	
 	# append task with examples from previous tasks
-	def getAppendedTask(self, t, model_init_name, batch_size, optimize_space=False, equal_weights=False, apply_log=False, is_sampling_reweighing=True):
+	def getAppendedTask(self, t, model_init_name, batch_size, optimize_space=False, equal_weights=False, apply_log=False, 
+						is_sampling_reweighing=True, sigma=None):
 		appended_task = None
 
 		# if equal_weights is True, then assign equal weights to all points till current task. 
@@ -398,6 +406,8 @@ class HyperparameterTuner(object):
 					else:
 						similarity[i] = np.matmul(cur_penultimate_output[i], old_penultimate_output.T)
 					similarity[i] = similarity[i] / old_penultimate_output_norm / cur_penultimate_output_norm[i]
+					if (sigma is not None):
+						similarity[i] = torch.nn.functional.softmax(torch.from_numpy(similarity[i] * sigma), dim=0).numpy()
 					if (apply_log):
 						similarity[i] = -np.log(similarity[i] + 1e-24)
 				if (self.use_gpu):
@@ -514,7 +524,9 @@ class HyperparameterTuner(object):
 					final_train=False, random_crop_flip=False, 
 					is_sampling_reweighing=True, 
 					do_bf_finetuning=False, num_updates_bf=-1, 
-					bf_only_penultimate_train=False):
+					bf_only_penultimate_train=False, 
+					only_calc_appended_task=False, 
+					sigma=None):
 		best_avg = 0.0 								# best average validation accuracy and hparams corresponding to it from self.hparams_list[t]
 		best_hparams = None
 		if model_init_name is None: 				# model with which to initialize weights
@@ -528,7 +540,7 @@ class HyperparameterTuner(object):
 				self.appended_task_list[0] = self.task_list[0]
 			else:
 				self.appended_task_list[t] = self.getAppendedTask(t, model_init_name, batch_size, optimize_space=True, equal_weights=equal_weights, 
-																	apply_log=apply_log, is_sampling_reweighing=is_sampling_reweighing)
+																	apply_log=apply_log, is_sampling_reweighing=is_sampling_reweighing, sigma=sigma)
 		else:
 			self.appended_task_list[t] = self.task_list[t]
 		
@@ -537,6 +549,9 @@ class HyperparameterTuner(object):
 
 		if (not restore_params):
 			model_init_name = None
+
+		if (only_calc_appended_task):
+			return None, None
 
 		# loop through self.hparams_list[t], train with it and find the best one
 		for hparams in self.hparams_list[t]:
@@ -618,7 +633,8 @@ class HyperparameterTuner(object):
 							apply_log=False, random_crop_flip=False, early_stop=False, 
 							old_new_ratio_list=None, is_sampling_reweighing=True, 
 							do_bf_finetuning=False, num_updates_bf=-1, 
-							bf_only_penultimate_train=False):
+							bf_only_penultimate_train=False, 
+							sigma=None):
 		if (num_updates < 0):
 			print("bad num_updates argument.. stopping")
 			return 0, self.hparams_list[start][0]
@@ -644,7 +660,7 @@ class HyperparameterTuner(object):
 						self.appended_task_list[i] = self.task_list[i]
 					else:
 						self.appended_task_list[i] = self.getAppendedTask(i, model_init_name, batch_size, optimize_space=True, equal_weights=equal_weights, 
-																			apply_log=apply_log, is_sampling_reweighing=is_sampling_reweighing)
+																			apply_log=apply_log, is_sampling_reweighing=is_sampling_reweighing, sigma=sigma)
 				else:
 					self.appended_task_list[i] = self.task_list[i]
 

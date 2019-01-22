@@ -6,7 +6,7 @@ from network import Network
 
 # Helps in doing single step of training on the Network object which it has
 class Classifier(object):
-	def __init__(self, network, input_shape, output_shape, checkpoint_path):
+	def __init__(self, network, input_shape, output_shape, checkpoint_path, reweigh_points_loss):
 		self.x = None                   		# tf.placeholder for training inputs
 		self.y = None 					
 		self.keep_prob_input = None     		#  tf.placeholder for dropout values
@@ -43,10 +43,10 @@ class Classifier(object):
 
 		self.theta = self.network.getLayerVariables() 		# list of tf trainable variables used to hold values of current task
 
-		self.loss = None 						# tf Tensor - loss
-		self.l2_loss = None 					# tf Tensor - regularization term
-		self.accuracy = None 					# tf Tensor - accuracy
-		self.createLossAccuracy() 				# computation graph for calculating loss and accuracy
+		self.loss = None 								# tf Tensor - loss
+		self.l2_loss = None 							# tf Tensor - regularization term
+		self.accuracy = None 							# tf Tensor - accuracy
+		self.createLossAccuracy(reweigh_points_loss) 	# computation graph for calculating loss and accuracy
 
 		self.saver = tf.train.Saver(max_to_keep=100, keep_checkpoint_every_n_hours=1, var_list=self.theta)
 	
@@ -75,10 +75,13 @@ class Classifier(object):
 		sess.run(self.scores_mask_assign, feed_dict={self.scores_mask_placeholder: mask})
 
 	# create computation graph for loss and accuracy
-	def createLossAccuracy(self):
+	def createLossAccuracy(self, reweigh_points_loss):
 		with tf.name_scope("loss"):
 			# improve : try just softmax_cross_entropy instead of sotmax_cross_entropy_with_logits?
-			average_nll = tf.reduce_sum(self.loss_weights * tf.nn.softmax_cross_entropy_with_logits(logits=self.scores, labels=self.y)) / tf.reduce_sum(self.loss_weights)
+			if (reweigh_points_loss):
+				average_nll = tf.reduce_sum(self.loss_weights * tf.nn.softmax_cross_entropy_with_logits(logits=self.scores, labels=self.y)) / tf.reduce_sum(self.loss_weights)
+			else:
+				average_nll = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits=self.scores, labels=self.y))
 			self.loss = average_nll
 			self.l2_loss = tf.add_n([tf.nn.l2_loss(v) for v in tf.trainable_variables() if ('bias' not in v.name and 'batch' not in v.name)])
 		with tf.name_scope('accuracy'):
