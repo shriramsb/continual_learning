@@ -31,6 +31,7 @@ class Classifier(object):
 		self.distill_mask = None 				# tf variable storing mask
 		self.distill_mask_placeholder = None 	# tf placeholder to assign self.distill_mask
 		self.distill_mask_assign_op = None 		# tf operation to assign scores_mask
+		self.scores_distill_size = 0
 		self.createDistillMask() 				# creates above objects for masking
 
 		# hyperparameters
@@ -44,7 +45,7 @@ class Classifier(object):
 		self.network = network 					# Network object
 		# feed-forward for training inputs
 		self.scores, self.layer_output = self.network.forward(self.x, self.apply_dropout, self.keep_prob_input, self.keep_prob_hidden, is_training=self.is_training)
-		self.scores_distill = tf.boolean_mask(self.scores, self.distill_mask, axis=1) 	# mask scores to get previous task's classes' scores
+		self.scores_distill = tf.boolean_mask(self.layer_output[-1], self.distill_mask, axis=1) 	# mask scores to get previous task's classes' scores
 		self.scores = tf.boolean_mask(self.scores, self.scores_mask, axis=1) 	# mask scores to remove unassigned class's scores
 
 		self.theta = self.network.getLayerVariables() 		# list of tf trainable variables used to hold values of current task
@@ -89,6 +90,7 @@ class Classifier(object):
 
 	def setDistillMask(self, sess, mask):
 		sess.run(self.distill_mask_assign, feed_dict={self.distill_mask_placeholder: mask})
+		self.scores_distill_size = np.sum(mask)
 
 	# create computation graph for loss and accuracy
 	def createLossAccuracy(self, reweigh_points_loss, use_distill=False, T=None, alpha=None):
@@ -181,6 +183,11 @@ class Classifier(object):
 		feed_dict.update({self.is_training: is_training})
 		if (teacher_outputs is not None):
 			feed_dict.update({self.teacher_outputs: teacher_outputs})
+		else:
+			if self.scores_distill_size > 0:
+				feed_dict.update({self.teacher_outputs: np.zeros((batch_xs.shape[0], self.scores_distill_size))})
+			else:
+				feed_dict.update({self.teacher_outputs: np.zeros((batch_xs.shape[0], 1))})
 		return feed_dict
 
 	# set hyperparamters

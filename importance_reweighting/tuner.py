@@ -23,7 +23,7 @@ VALIDATION_BATCH_SIZE = 1024
 # Dataset - helps access dataset batch-wise
 class MyDataset(object):
 	# improve : shuffle dataset?
-	def __init__(self, images, labels, weights=None):
+	def __init__(self, images, labels, weights=None, new_task_size=None):
 		self.images = images
 		self.labels = labels
 		self.batch_size = 0
@@ -34,6 +34,15 @@ class MyDataset(object):
 		else:
 			self.weights = weights
 		self.pos = 0                             	# pointer storing position starting from which to return data for nextBatch()
+
+		if new_task_size is None or weights is None:
+			self.old_task_equalized_weights = np.array([1 / images.shape[0] for _ in range(images.shape[0])])
+		else:
+			# old images appear before new images
+			self.old_task_equalized_weights = np.empty(weights.shape)
+			self.old_task_equalized_weights[-new_task_size : ] = weights[-new_task_size : ]
+			old_task_size = images.shape[0] - new_task_size
+			self.old_task_equalized_weights[ : old_task_size] = (1.0 - np.sum(weights[-new_task_size : ])) / old_task_size
 
 		self.final_outputs = None
 
@@ -79,18 +88,32 @@ class MyDataset(object):
 	# with epsilon probability, samples uniformly
 	def nextBatchSample(self, sess, random_flip=False, random_crop=False, epsilon=0.0):
 		total_examples = self.images.shape[0]
-		if (np.random.rand() < epsilon):
-			sampled_indices = np.random.choice(range(total_examples), size=self.batch_size)
-			batch_weights = np.ones(self.batch_size)
-		else:
-			sampled_indices = np.random.choice(range(total_examples), p = self.weights, size=self.batch_size)
-			batch_weights = 1.0 / self.weights[sampled_indices]             # calculate inverse of weights of samples to reweigh them in loss function
-		batch_xs = self.images[sampled_indices]
-		batch_ys = self.labels[sampled_indices]
-		if self.final_outputs is not None:
-			batch_final_outputs = self.final_outputs[sampled_indices]
+		num_uniform_samples = int(self.batch_size * epsilon)
+		num_selective_samples = self.batch_size - num_uniform_samples
+		batch_xs = np.empty(tuple([self.batch_size] + list(self.images.shape[1 : ])))
+		batch_ys = np.empty(tuple([self.batch_size] + list(self.labels.shape[1 : ])))
+		batch_weights = np.empty((self.batch_size, ))
+		if (self.final_outputs is not None):
+			batch_final_outputs = np.empty(tuple([self.batch_size] + list(self.final_outputs.shape[1 : ])))
 		else:
 			batch_final_outputs = None
+
+		if (num_uniform_samples > 0):
+			sampled_indices = np.random.choice(range(total_examples), p=self.old_task_equalized_weights, size=num_uniform_samples)
+			batch_xs[ : num_uniform_samples] = self.images[sampled_indices]
+			batch_ys[ : num_uniform_samples] = self.labels[sampled_indices]
+			batch_weights[ : num_uniform_samples] = 1.0 / total_examples
+			if (self.final_outputs is not None):
+				batch_final_outputs[ : num_uniform_samples] = self.final_outputs[sampled_indices]
+
+		if (num_selective_samples > 0):
+			sampled_indices = np.random.choice(range(total_examples), p = self.weights, size=num_selective_samples)
+			batch_xs[num_uniform_samples : ] = self.images[sampled_indices]
+			batch_ys[num_uniform_samples : ] = self.labels[sampled_indices]
+			# calculate inverse of weights of samples to reweigh them in loss function
+			batch_weights[num_uniform_samples : ] = 1.0 / self.weights[sampled_indices]
+			if (self.final_outputs is not None):
+				batch_final_outputs[num_uniform_samples : ] = self.final_outputs[sampled_indices]
 
 		if random_flip:
 			for i in range(batch_xs.shape[0]):
@@ -110,24 +133,24 @@ class MyDataset(object):
 
 # Task having dataset for train, dev, test
 class MyTask(object):
-	def __init__(self, task, train_images=None, train_labels=None, weights=None):        
+	def __init__(self, task, train_images=None, train_labels=None, weights=None, new_task_size=None):        
 		# MNIST dataset from tf loaded dataset
 		if (type(task) == tf.contrib.learn.datasets.base.Datasets):
 			weights = np.array([1 for _ in range(task.train._images.shape[0])]) / task.train._images.shape[0]
-			self.train = MyDataset(task.train._images, task.train._labels, weights)
+			self.train = MyDataset(task.train._images, task.train._labels, weights, new_task_size=new_task_size)
 			self.validation = MyDataset(task.validation._images, task.validation._labels)
 			self.test = MyDataset(task.test._images, task.test._labels)
 		else:
 			if train_images is None:
 				if weights is None:
 					weights = np.array([1 for _ in range(task.train.images.shape[0])]) / task.train.images.shape[0]
-				self.train = MyDataset(task.train.images, task.train.labels, weights)
+				self.train = MyDataset(task.train.images, task.train.labels, weights, new_task_size=new_task_size)
 				self.validation = MyDataset(task.validation.images, task.validation.labels)
 				self.test = MyDataset(task.test.images, task.test.labels)
 			else:
 				if weights is None:
 					weights = np.array([1 for _ in range(train_images.shape[0])]) / train_images.shape[0]
-				self.train = MyDataset(train_images, train_labels, weights)
+				self.train = MyDataset(train_images, train_labels, weights, new_task_size=new_task_size)
 				self.validation = MyDataset(task.validation.images, task.validation.labels)
 				self.test = MyDataset(task.test.images, task.test.labels)
 
@@ -228,10 +251,11 @@ class HyperparameterTuner(object):
 		hparams = default_hparams
 		self.classifier.updateHparams(hparams)
 
-		use_distill = t > 0 and (hparams['T'] is not None) and (not is_bf_finetuning_phase)
-		if (use_distill):
-			self.setDistillMask(t - 1)
+		use_distill = t > 0 and (hparams['T'] is not None)
+		if (use_distill and (not is_bf_finetuning_phase)):
 			self.classifier.createLossAccuracy(self.reweigh_points_loss, use_distill=True, T=hparams['T'], alpha=hparams['alpha'])
+		if (use_distill and is_bf_finetuning_phase):
+			self.classifier.createLossAccuracy(self.reweigh_points_loss, use_distill=False)
 		
 		# model_name depending on current hparams
 		model_name = self.fileName(t, hparams, self.tuner_hparams)
@@ -246,6 +270,8 @@ class HyperparameterTuner(object):
 
 		if (self.tuner_hparams['mask_softmax']):
 			self.setScoresMask(t)
+		if (use_distill and (not is_bf_finetuning_phase)):
+			self.setDistillMask(t - 1)
 
 		# variables to monitor training
 		val_acc = [[] for _ in range(t + 1)] 						# validation loss, accuracy for all tasks till current task
@@ -467,7 +493,8 @@ class HyperparameterTuner(object):
 				appended_weights[0 : old_task_weights.shape[0]] = old_task_weights
 				appended_weights[ old_task_weights.shape[0] : ] = cur_task_weights
 				
-				appended_task = MyTask(self.task_list[t], train_images=appended_images, train_labels=appended_labels, weights=appended_weights)
+				appended_task = MyTask(self.task_list[t], train_images=appended_images, train_labels=appended_labels, weights=appended_weights, 
+										new_task_size=cur_task_weights.shape[0])
 			else:
 				old_new_ratio = int(old_new_ratio)
 				topk_similar = np.argsort(similarity, axis=-1)[:, -old_new_ratio: ]
@@ -533,9 +560,7 @@ class HyperparameterTuner(object):
 				
 				appended_task = MyTask(self.task_list[t], train_images=appended_images, train_labels=appended_labels)
 
-		with open(self.checkpoint_path + model_init_name + '_final_output.txt', 'rb') as f:
-			old_final_output, old_taskid_offset = pickle.load(f)
-		appended_task.loadFinalOutput(old_final_output)
+		
 		return appended_task
 
 	def hparamsDictToTuple(self, hparams, tuner_hparams):
@@ -578,6 +603,9 @@ class HyperparameterTuner(object):
 
 		if (only_calc_appended_task):
 			return None, None
+
+		if (t > 0 and ('T' in self.hparams_list[t][0].keys())):
+			self.appended_task_list[i].loadFinalOutput(self.getAllLayerOutput(t, batch_size, -1)[0][:, self.cumulative_split[t - 1]])
 
 		# loop through self.hparams_list[t], train with it and find the best one
 		for hparams in self.hparams_list[t]:
@@ -629,7 +657,7 @@ class HyperparameterTuner(object):
 		# calculate penultimate output of all tasks till 't' and save to file
 		if (self.save_penultimate_output):
 			self.savePenultimateOutput(t, batch_size, hparams)
-			self.saveFinalOutput(t, batch_size, hparams)
+			# self.saveFinalOutput(t, batch_size, hparams)
 
 		return best_avg, best_hparams
 
@@ -653,7 +681,7 @@ class HyperparameterTuner(object):
 		active_outputs = self.cumulative_split[task]
 		active_outputs_bool = np.zeros(self.output_shape[0], dtype=np.bool)
 		active_outputs_bool[active_outputs] = True
-		self.classifier.setDsitillMask(self.sess, active_outputs_bool)
+		self.classifier.setDistillMask(self.sess, active_outputs_bool)
 		self.distill_active_outputs = self.cumulative_split[task]		
 
 	# train on a range of tasks sequentially [start, end] with different hparams ; currently only positive num_updates allowed
@@ -662,6 +690,7 @@ class HyperparameterTuner(object):
 							old_new_ratio_list=None, is_sampling_reweighing=True, 
 							do_bf_finetuning=False, num_updates_bf=-1, 
 							bf_only_penultimate_train=False, 
+							eval_test_dataset=False,
 							sigma=None):
 		if (num_updates < 0):
 			print("bad num_updates argument.. stopping")
@@ -670,6 +699,7 @@ class HyperparameterTuner(object):
 		best_avg = 0.0
 		best_hparams_index = -1
 
+		test_accuracies = []
 		# for each hparam, train on tasks in [start, end]
 		for k in range(num_hparams):
 			# requires model to have been trained on task (start - 1) with same hparams self.hparams_list[start - 1][k]
@@ -677,7 +707,13 @@ class HyperparameterTuner(object):
 				model_init_name = None
 				if (i > 0):
 					if (restore_params):
-						model_init_name = self.fileName(i - 1, self.hparams_list[i - 1][k], self.tuner_hparams)
+						if (i == 1):
+							per_example_append_backup = self.tuner_hparams['old:new']
+							self.setPerExampleAppend(1.0)
+							model_init_name = self.fileName(i - 1, self.hparams_list[i - 1][k], self.tuner_hparams)
+							self.setPerExampleAppend(per_example_append_backup)
+						else:
+							model_init_name = self.fileName(i - 1, self.hparams_list[i - 1][k], self.tuner_hparams)
 				
 				if (old_new_ratio_list is not None):
 					self.setPerExampleAppend(old_new_ratio_list[i])
@@ -699,6 +735,10 @@ class HyperparameterTuner(object):
 					self.appended_random_task_list[i] = self.getAppendedRandomTask(i)
 
 				hparams = self.hparams_list[i][k]
+
+				if (i > 0 and ('T' in self.hparams_list[i][0].keys())):
+					self.appended_task_list[i].loadFinalOutput(self.getAllLayerOutput(i, batch_size, -1)[0][:, self.cumulative_split[i - 1]])
+
 				cur_result = self.train(i, hparams, batch_size, model_init_name, num_updates=num_updates, verbose=verbose, 
 										random_crop_flip=random_crop_flip)
 				
@@ -732,8 +772,10 @@ class HyperparameterTuner(object):
 
 				if (self.save_penultimate_output):
 					self.savePenultimateOutput(i, batch_size, hparams)
-					self.saveFinalOutput(i, batch_size, hparams)
+					# self.saveFinalOutput(i, batch_size, hparams)
 
+				if (eval_test_dataset):
+					test_accuracies.append(self.test(i, batch_size, restore_model=False))
 
 			if (cur_best_avg > best_avg):
 				best_avg = cur_best_avg
@@ -744,7 +786,10 @@ class HyperparameterTuner(object):
 				self.setPerExampleAppend(old_new_ratio_list[i])
 			self.best_hparams[i] = (self.hparams_list[i][best_hparams_index], self.tuner_hparams, self.fileName(i, self.hparams_list[i][best_hparams_index], self.tuner_hparams))
 
-		return best_avg, best_hparams_index
+		if (not eval_test_dataset):
+			return best_avg, best_hparams_index
+		else:
+			return best_avg, best_hparams_index, test_accuracies
 
 
 	def savePenultimateOutput(self, i ,batch_size, hparams):
@@ -845,9 +890,12 @@ class HyperparameterTuner(object):
 			return accuracy
 
 	# test accuracy till task 't'
-	def test(self, t, batch_size, restore_model=True, get_loss=False):
+	def test(self, t, batch_size, restore_model=True, get_loss=False, hparams=None):
 		if restore_model:
-			self.classifier.restoreModel(self.sess, self.best_hparams[t][-1])
+			if hparams is None:
+				self.classifier.restoreModel(self.sess, self.best_hparams[t][-1])
+			else:
+				self.classifier.restoreModel(self.sess, self.fileName(t, hparams, self.tuner_hparams))
 
 		if (self.tuner_hparams['mask_softmax']):
 			self.setScoresMask(t)
