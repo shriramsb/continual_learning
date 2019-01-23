@@ -747,7 +747,7 @@ class HyperparameterTuner(object):
 		return best_avg, best_hparams_index
 
 
-	def savePenultimateOutput(i ,batch_size, hparams):
+	def savePenultimateOutput(self, i ,batch_size, hparams):
 		print("calculating penultimate output...")
 		start_time = time.time()
 		penultimate_output, taskid_offset = self.getAllLayerOutput(i, batch_size, -2)
@@ -756,7 +756,7 @@ class HyperparameterTuner(object):
 		with open(self.checkpoint_path + self.fileName(i, hparams, self.tuner_hparams) + '_penultimate_output.txt', 'wb') as f:
 			pickle.dump((penultimate_output, taskid_offset), f)
 
-	def saveFinalOutput(i ,batch_size, hparams):
+	def saveFinalOutput(self, i ,batch_size, hparams):
 		print("calculating final output...")
 		start_time = time.time()
 		final_output, taskid_offset = self.getAllLayerOutput(i, batch_size, -1)
@@ -768,7 +768,7 @@ class HyperparameterTuner(object):
 	# get penultimate output of all layers till 't' using current parameters of network
 	def getAllLayerOutput(self, t, batch_size, layer_index):
 		total_elements = sum([task.train.images.shape[0] for task in self.task_list[0: t + 1]])
-		penultimate_output_size = int(self.classifier.layer_output[-2].shape[-1])
+		penultimate_output_size = int(self.classifier.layer_output[layer_index].shape[-1])
 		penultimate_output = np.empty(shape=(total_elements, penultimate_output_size))
 		taskid_offset = np.full((total_elements, 2), -1)
 		offset = 0
@@ -784,7 +784,7 @@ class HyperparameterTuner(object):
 	# get penultimate output for task 't' using current parameters of network
 	def getLayerOutput(self, t, batch_size, layer_index):
 		num_elements = self.task_list[t].train.images.shape[0]
-		penultimate_output_size = int(self.classifier.layer_output[-2].shape[-1])
+		penultimate_output_size = int(self.classifier.layer_output[layer_index].shape[-1])
 		penultimate_output = np.empty(shape=(num_elements, penultimate_output_size))
 		taskid_offset = np.full((num_elements, 2), -1)
 		offset = 0
