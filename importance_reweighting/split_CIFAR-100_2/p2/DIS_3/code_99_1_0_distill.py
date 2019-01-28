@@ -88,8 +88,8 @@ else:
     task_home = '../../../../'
 
 cur_dir = './'
-checkpoint_path = cur_dir + 'checkpoints_99_1_0_no_distill/'
-summaries_path = cur_dir + 'summaries_99_1_0_no_distill/'
+checkpoint_path = cur_dir + 'checkpoints_99_1_0_distill/'
+summaries_path = cur_dir + 'summaries_99_1_0_distill/'
 data_path = task_home + 'cifar-100-python/'
 split_path = './split.txt' 
 if use_tpu:
@@ -292,19 +292,28 @@ momentums = [0.9]
 regs = [0.00001]
 dropout_input_probs = [1.0]
 dropout_hidden_probs = [0.9]
+# epsilons = [1.0]
+T = [5]
+if (len(sys.argv) > 5):
+    T = [float(sys.argv[5])]
+alphas = [0.5]
+if (len(sys.argv) > 6):
+    alphas = [float(sys.argv[6])]
 epsilons = [float(sys.argv[2])]
 # epsilons = [0.0, 0.1, 0.2, 0.4, 0.5, 0.7, 1.0]
-prod = list(itertools.product(regs, dropout_input_probs, dropout_hidden_probs, momentums, learning_rates, 
+prod = list(itertools.product(T, alphas, regs, dropout_input_probs, dropout_hidden_probs, momentums, learning_rates, 
                                 epsilons))
 hparams = []
 for hparams_tuple in prod:
     cur_dict = {}
-    cur_dict['reg'] = hparams_tuple[0]
-    cur_dict['dropout_input_prob'] = hparams_tuple[2]
-    cur_dict['dropout_hidden_prob'] = hparams_tuple[2]
-    cur_dict['momentum'] = hparams_tuple[3]
-    cur_dict['learning_rate'] = hparams_tuple[4]
-    cur_dict['epsilon'] = hparams_tuple[5]
+    cur_dict['T'] = hparams_tuple[0]
+    cur_dict['alpha'] = hparams_tuple[1]
+    cur_dict['reg'] = hparams_tuple[2]
+    cur_dict['dropout_input_prob'] = hparams_tuple[4]
+    cur_dict['dropout_hidden_prob'] = hparams_tuple[4]
+    cur_dict['momentum'] = hparams_tuple[5]
+    cur_dict['learning_rate'] = hparams_tuple[6]
+    cur_dict['epsilon'] = hparams_tuple[7]
     hparams.append(cur_dict)
     
 for i in range(t, t + 1):
@@ -313,6 +322,7 @@ for i in range(t, t + 1):
 for i in range(0, t):
     for _ in range(len(hparams)):
         tuner.hparams_list[i].append(tuner.hparams_list[i][0])
+    
     
 
 
@@ -342,7 +352,8 @@ for i in range(int(sys.argv[4])):
     test_accuracies.append(test_acc)
 
 
-test_acc_file_name = 'new:old=' + sys.argv[1] + 'epsilon=' + sys.argv[2] + 'sigma=' + sys.argv[3] + 'num_repeat_expt=' + sys.argv[4] 
+test_acc_file_name = 'new:old=' + sys.argv[1] + 'epsilon=' + sys.argv[2] + 'sigma=' + sys.argv[3] + 'num_repeat_expt=' + sys.argv[4] + \
+                        'T=' + sys.argv[5] + 'alpha=' + sys.argv[6]
 with open(summaries_path + test_acc_file_name + '_test_accuracies.dat', 'wb') as f:
     pickle.dump(test_accuracies, f)
 

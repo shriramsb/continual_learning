@@ -737,7 +737,7 @@ class HyperparameterTuner(object):
 				hparams = self.hparams_list[i][k]
 
 				if (i > 0 and ('T' in self.hparams_list[i][0].keys())):
-					self.appended_task_list[i].loadFinalOutput(self.getAllLayerOutput(i, batch_size, -1)[0][:, self.cumulative_split[i - 1]])
+					self.appended_task_list[i].loadFinalOutput(self.getAllLayerOutput(i, batch_size, -1)[0][:, list(np.sort(self.cumulative_split[i - 1]))])
 
 				cur_result = self.train(i, hparams, batch_size, model_init_name, num_updates=num_updates, verbose=verbose, 
 										random_crop_flip=random_crop_flip)

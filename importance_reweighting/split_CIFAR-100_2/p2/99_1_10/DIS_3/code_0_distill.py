@@ -12,7 +12,7 @@ from IPython.display import Audio
 # In[2]:
 
 import sys
-sys.path.append('../../../')
+sys.path.append('../../../../')
 
 # In[3]:
 
@@ -47,7 +47,7 @@ if use_gpu:
 
 
 if use_gpu:
-    os.environ['CUDA_VISIBLE_DEVICES'] = '2'
+    os.environ['CUDA_VISIBLE_DEVICES'] = '1'
     config = tf.ConfigProto()
     config.gpu_options.allow_growth = True
 
@@ -85,11 +85,11 @@ if use_tpu:
     pass
 #     task_home = 'gs://continual_learning/permMNIST_EWC/'
 else:
-    task_home = '../../../../'
+    task_home = '../../../../../'
 
 cur_dir = './'
-checkpoint_path = cur_dir + 'checkpoints_99_1_0_no_distill/'
-summaries_path = cur_dir + 'summaries_99_1_0_no_distill/'
+checkpoint_path = cur_dir + 'checkpoints_0_distill/'
+summaries_path = cur_dir + 'summaries_0_distill/'
 data_path = task_home + 'cifar-100-python/'
 split_path = './split.txt' 
 if use_tpu:
@@ -153,8 +153,6 @@ class TempTask(object):
     
 def readDatasets():
     num_class = 100
-    class_per_task = 2
-    k = 0
     labels_list = list(range(num_class))
     seed = 0
     np.random.seed(seed)
@@ -162,8 +160,11 @@ def readDatasets():
     split = []
     task_weights = []
     
-    split = [range(99), [99]]
-    task_weights = [0.99, 0.01]
+    split = [labels_list[ : 90]]
+    task_weights = [0.90]
+    for single_label in labels_list[90 : ]:
+        split.append([single_label])
+        task_weights.append(0.01)
     num_tasks = len(split)
     
     with open(data_path + 'train', 'rb') as f:
@@ -286,33 +287,43 @@ for i in range(0, t + 1):
 # In[17]:
 
 
-t = 1
-learning_rates = [(((20, 1e-1), (30, 1e-1 / 5), 1e-1 / 25), ((20, 1e-2), 1e-2 / 5))]
+t = 10
+learning_rates = [(((45, 1e-1), (55, 1e-1 / 5), 1e-1 / 25), ((9, 1e-2), 1e-2 / 5))]
 momentums = [0.9]
 regs = [0.00001]
 dropout_input_probs = [1.0]
 dropout_hidden_probs = [0.9]
+# epsilons = [1.0]
+T = [5]
+if (len(sys.argv) > 5):
+    T = [float(sys.argv[5])]
+alphas = [0.5]
+if (len(sys.argv) > 6):
+    alphas = [float(sys.argv[6])]
 epsilons = [float(sys.argv[2])]
 # epsilons = [0.0, 0.1, 0.2, 0.4, 0.5, 0.7, 1.0]
-prod = list(itertools.product(regs, dropout_input_probs, dropout_hidden_probs, momentums, learning_rates, 
+prod = list(itertools.product(T, alphas, regs, dropout_input_probs, dropout_hidden_probs, momentums, learning_rates, 
                                 epsilons))
 hparams = []
 for hparams_tuple in prod:
     cur_dict = {}
-    cur_dict['reg'] = hparams_tuple[0]
-    cur_dict['dropout_input_prob'] = hparams_tuple[2]
-    cur_dict['dropout_hidden_prob'] = hparams_tuple[2]
-    cur_dict['momentum'] = hparams_tuple[3]
-    cur_dict['learning_rate'] = hparams_tuple[4]
-    cur_dict['epsilon'] = hparams_tuple[5]
+    cur_dict['T'] = hparams_tuple[0]
+    cur_dict['alpha'] = hparams_tuple[1]
+    cur_dict['reg'] = hparams_tuple[2]
+    cur_dict['dropout_input_prob'] = hparams_tuple[4]
+    cur_dict['dropout_hidden_prob'] = hparams_tuple[4]
+    cur_dict['momentum'] = hparams_tuple[5]
+    cur_dict['learning_rate'] = hparams_tuple[6]
+    cur_dict['epsilon'] = hparams_tuple[7]
     hparams.append(cur_dict)
     
-for i in range(t, t + 1):
+for i in range(1, t + 1):
     tuner.hparams_list[i] = hparams
 
-for i in range(0, t):
+for i in range(0, 1):
     for _ in range(len(hparams)):
         tuner.hparams_list[i].append(tuner.hparams_list[i][0])
+    
     
 
 
@@ -320,9 +331,9 @@ for i in range(0, t):
 
 
 num_hparams = len(hparams)
-num_epochs = 40
+num_epochs = 60
 num_updates = math.ceil(tuner.task_list[t].train.images.shape[0] / BATCH_SIZE) * num_epochs
-num_epochs_bf = 30
+num_epochs_bf = 10
 num_updates_bf = math.ceil(tuner.task_list[t].train.images.shape[0] / BATCH_SIZE) * num_epochs_bf
 
 
@@ -342,7 +353,8 @@ for i in range(int(sys.argv[4])):
     test_accuracies.append(test_acc)
 
 
-test_acc_file_name = 'new:old=' + sys.argv[1] + 'epsilon=' + sys.argv[2] + 'sigma=' + sys.argv[3] + 'num_repeat_expt=' + sys.argv[4] 
+test_acc_file_name = 'new:old=' + sys.argv[1] + 'epsilon=' + sys.argv[2] + 'sigma=' + sys.argv[3] + 'num_repeat_expt=' + sys.argv[4] + \
+                        'T=' + str(T[0]) + 'alpha=' + str(alphas[0])
 with open(summaries_path + test_acc_file_name + '_test_accuracies.dat', 'wb') as f:
     pickle.dump(test_accuracies, f)
 

@@ -3,24 +3,24 @@
 
 # ### Import and init GPU
 
-# argvs
-# 1 - new:old; 2 - epsilon; 3 - sigma; 4 - num_repeat_expt
+# In[1]:
+
 
 from IPython.display import Audio
 
 
 # In[2]:
 
+
 import sys
-sys.path.append('../../../')
+sys.path.append('../../../../')
+
 
 # In[3]:
 
+
 import numpy as np
 import math
-
-import matplotlib.pyplot as plt
-import seaborn
 
 import pickle
 import argparse
@@ -41,13 +41,13 @@ if use_tpu:
 
 if use_gpu:
     import os
-    
+
 
 # In[4]:
 
 
 if use_gpu:
-    os.environ['CUDA_VISIBLE_DEVICES'] = '2'
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
     config = tf.ConfigProto()
     config.gpu_options.allow_growth = True
 
@@ -85,11 +85,11 @@ if use_tpu:
     pass
 #     task_home = 'gs://continual_learning/permMNIST_EWC/'
 else:
-    task_home = '../../../../'
+    task_home = '../../../../../'
 
 cur_dir = './'
-checkpoint_path = cur_dir + 'checkpoints_99_1_0_no_distill/'
-summaries_path = cur_dir + 'summaries_99_1_0_no_distill/'
+checkpoint_path = cur_dir + 'checkpoints_0/'
+summaries_path = cur_dir + 'summaries_0/'
 data_path = task_home + 'cifar-100-python/'
 split_path = './split.txt' 
 if use_tpu:
@@ -153,8 +153,6 @@ class TempTask(object):
     
 def readDatasets():
     num_class = 100
-    class_per_task = 2
-    k = 0
     labels_list = list(range(num_class))
     seed = 0
     np.random.seed(seed)
@@ -162,8 +160,11 @@ def readDatasets():
     split = []
     task_weights = []
     
-    split = [range(99), [99]]
-    task_weights = [0.99, 0.01]
+    split = [labels_list[ : 90]]
+    task_weights = [0.90]
+    for single_label in labels_list[90 : ]:
+        split.append([single_label])
+        task_weights.append(0.01)
     num_tasks = len(split)
     
     with open(data_path + 'train', 'rb') as f:
@@ -246,15 +247,15 @@ output_shape = (100, )
 tuner = HyperparameterTuner(sess=sess, network=network, 
                             input_shape=input_shape, output_shape=output_shape,
                             checkpoint_path=checkpoint_path, summaries_path=summaries_path, 
-                            readDatasets=readDatasets, load_best_hparams=False, 
-                            reweigh_points_loss=False)
+                            readDatasets=readDatasets, load_best_hparams=False)
 
 
 # In[12]:
 
+
+tuner.setPerExampleAppend(1.0)
 tuner.updateTunerHparams({'mask_softmax' : True})
-tuner.updateTunerHparams({'bf_num_images' : 2000})
-tuner.setPerExampleAppend(float(sys.argv[1]))
+
 
 # ### Train tasks together
 
@@ -283,19 +284,34 @@ for i in range(0, t + 1):
     
 
 
-# In[17]:
+# In[14]:
 
 
-t = 1
-learning_rates = [(((20, 1e-1), (30, 1e-1 / 5), 1e-1 / 25), ((20, 1e-2), 1e-2 / 5))]
+# num_hparams = len(hparams)
+# num_epochs = 70
+# num_updates = math.ceil(tuner.task_list[t].train.images.shape[0] / BATCH_SIZE) * num_epochs
+# tuner.print_every = 100
+
+
+# # In[ ]:
+
+
+# best_avg, best_hparams_index = tuner.tuneTasksInRange(0, t, BATCH_SIZE, num_hparams, 
+#                                                         num_updates=num_updates, verbose=True, 
+#                                                         random_crop_flip=True, 
+#                                                         equal_weights=True)
+
+
+# In[ ]:
+
+
+t = 10
+learning_rates = [(((49, 1e-1), (63, 1e-1 / 5), 1e-1 / (5 * 5)), (1e-1, ))]
 momentums = [0.9]
 regs = [0.00001]
 dropout_input_probs = [1.0]
 dropout_hidden_probs = [0.9]
-epsilons = [float(sys.argv[2])]
-# epsilons = [0.0, 0.1, 0.2, 0.4, 0.5, 0.7, 1.0]
-prod = list(itertools.product(regs, dropout_input_probs, dropout_hidden_probs, momentums, learning_rates, 
-                                epsilons))
+prod = list(itertools.product(regs, dropout_input_probs, dropout_hidden_probs, momentums, learning_rates))
 hparams = []
 for hparams_tuple in prod:
     cur_dict = {}
@@ -304,47 +320,37 @@ for hparams_tuple in prod:
     cur_dict['dropout_hidden_prob'] = hparams_tuple[2]
     cur_dict['momentum'] = hparams_tuple[3]
     cur_dict['learning_rate'] = hparams_tuple[4]
-    cur_dict['epsilon'] = hparams_tuple[5]
     hparams.append(cur_dict)
     
-for i in range(t, t + 1):
+for i in range(1, t + 1):
     tuner.hparams_list[i] = hparams
 
-for i in range(0, t):
-    for _ in range(len(hparams)):
-        tuner.hparams_list[i].append(tuner.hparams_list[i][0])
-    
 
-
-# In[18]:
+# In[ ]:
 
 
 num_hparams = len(hparams)
-num_epochs = 40
+num_epochs = 70
 num_updates = math.ceil(tuner.task_list[t].train.images.shape[0] / BATCH_SIZE) * num_epochs
-num_epochs_bf = 30
-num_updates_bf = math.ceil(tuner.task_list[t].train.images.shape[0] / BATCH_SIZE) * num_epochs_bf
+tuner.print_every = 100
 
 
-# In[19]:
+# In[ ]:
 
 test_accuracies = []
 
-for i in range(int(sys.argv[4])):
-    _, _, test_acc = tuner.tuneTasksInRange(1, t, BATCH_SIZE, num_hparams, 
-                                            num_updates=num_updates, verbose=True, 
-                                            random_crop_flip=True, 
-                                            is_sampling_reweighing=True, 
-                                            do_bf_finetuning=True, num_updates_bf=num_updates_bf, 
-                                            bf_only_penultimate_train=False, 
-                                            eval_test_dataset=True, 
-                                            sigma=float(sys.argv[3]))
+for i in range(int(sys.argv[1])):
+    _, _, test_acc  = tuner.tuneTasksInRange(1, t, BATCH_SIZE, num_hparams, 
+                                                num_updates=num_updates, verbose=True, 
+                                                random_crop_flip=True, 
+                                                equal_weights=True, 
+                                                eval_test_dataset=True)
     test_accuracies.append(test_acc)
 
-
-test_acc_file_name = 'new:old=' + sys.argv[1] + 'epsilon=' + sys.argv[2] + 'sigma=' + sys.argv[3] + 'num_repeat_expt=' + sys.argv[4] 
+test_acc_file_name = 'uniform_sampling' + 'num_repeat_expt=' + sys.argv[1]
 with open(summaries_path + test_acc_file_name + '_test_accuracies.dat', 'wb') as f:
     pickle.dump(test_accuracies, f)
+
 
 # In[ ]:
 
@@ -353,3 +359,4 @@ if use_tpu:
     sess.run(tpu.shutdown_system())
 
 sess.close()
+

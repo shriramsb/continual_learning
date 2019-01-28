@@ -12,7 +12,7 @@ from IPython.display import Audio
 # In[2]:
 
 import sys
-sys.path.append('../../../')
+sys.path.append('../../../../')
 
 # In[3]:
 
@@ -47,7 +47,7 @@ if use_gpu:
 
 
 if use_gpu:
-    os.environ['CUDA_VISIBLE_DEVICES'] = '2'
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
     config = tf.ConfigProto()
     config.gpu_options.allow_growth = True
 
@@ -85,11 +85,11 @@ if use_tpu:
     pass
 #     task_home = 'gs://continual_learning/permMNIST_EWC/'
 else:
-    task_home = '../../../../'
+    task_home = '../../../../../'
 
 cur_dir = './'
-checkpoint_path = cur_dir + 'checkpoints_99_1_0_no_distill/'
-summaries_path = cur_dir + 'summaries_99_1_0_no_distill/'
+checkpoint_path = cur_dir + 'checkpoints_0_no_distill/'
+summaries_path = cur_dir + 'summaries_0_no_distill/'
 data_path = task_home + 'cifar-100-python/'
 split_path = './split.txt' 
 if use_tpu:
@@ -153,8 +153,6 @@ class TempTask(object):
     
 def readDatasets():
     num_class = 100
-    class_per_task = 2
-    k = 0
     labels_list = list(range(num_class))
     seed = 0
     np.random.seed(seed)
@@ -162,8 +160,11 @@ def readDatasets():
     split = []
     task_weights = []
     
-    split = [range(99), [99]]
-    task_weights = [0.99, 0.01]
+    split = [labels_list[ : 90]]
+    task_weights = [0.90]
+    for single_label in labels_list[90 : ]:
+        split.append([single_label])
+        task_weights.append(0.01)
     num_tasks = len(split)
     
     with open(data_path + 'train', 'rb') as f:
@@ -286,7 +287,7 @@ for i in range(0, t + 1):
 # In[17]:
 
 
-t = 1
+t = 10
 learning_rates = [(((20, 1e-1), (30, 1e-1 / 5), 1e-1 / 25), ((20, 1e-2), 1e-2 / 5))]
 momentums = [0.9]
 regs = [0.00001]
@@ -307,10 +308,10 @@ for hparams_tuple in prod:
     cur_dict['epsilon'] = hparams_tuple[5]
     hparams.append(cur_dict)
     
-for i in range(t, t + 1):
+for i in range(1, t + 1):
     tuner.hparams_list[i] = hparams
 
-for i in range(0, t):
+for i in range(0, 1):
     for _ in range(len(hparams)):
         tuner.hparams_list[i].append(tuner.hparams_list[i][0])
     
