@@ -14,6 +14,8 @@ import pickle
 
 import torch
 
+import tensorboardX
+
 import tensorflow as tf
 
 MINI_BATCH_SIZE = 250
@@ -179,11 +181,14 @@ class HyperparameterTuner(object):
 		self.split, self.num_tasks, self.task_weights, self.task_list = readDatasets() 	# readDataset() passed as argument to __init__, returns dataset
 
 		# used for masking outputs for each task
+		for t in range(self.num_tasks):
+			self.split[t].sort()
 		self.cumulative_split = []
 		for t in range(self.num_tasks):
 			self.cumulative_split.append([])
 			for i in range(t + 1):
 				self.cumulative_split[t].extend(self.split[i])
+			self.cumulative_split[t].sort()
 		
 		self.best_hparams = [None for _ in range(self.num_tasks)] 	# best hparams after training, for each task
 		self.results_list = [{} for _ in range(self.num_tasks)] 	# results (list of loss, accuracy) for each task, hparam
@@ -228,6 +233,8 @@ class HyperparameterTuner(object):
 
 		self.reweigh_points_loss = reweigh_points_loss
 
+		self.is_write_tensorboard = False
+
 	# updates self.tuner_hparams dict with provided argument
 	def updateTunerHparams(self, updated_vals):
 		self.tuner_hparams.update(updated_vals)
@@ -246,6 +253,7 @@ class HyperparameterTuner(object):
 	def train(self, t, hparams, batch_size, model_init_name, num_updates=-1, verbose=False, random_crop_flip=False, save_weights_every_epoch=False, 
 				is_bf_finetuning_phase=False, only_penultimate_train=False):
 		# make sure hparams has all required hparams for classifier
+
 		default_hparams = deepcopy(self.default_hparams)
 		default_hparams.update(hparams)
 		hparams = default_hparams
@@ -273,6 +281,10 @@ class HyperparameterTuner(object):
 		if (use_distill and (not is_bf_finetuning_phase)):
 			self.setDistillMask(t - 1)
 
+		if (self.is_write_tensorboard):
+			self.tensorboardX_writer = None
+			self.tensorboardX_writer = writer = tensorboardX.SummaryWriter(log_dir=self.summaries_path + 'tensorboardX/' + model_name)
+
 		# variables to monitor training
 		val_acc = [[] for _ in range(t + 1)] 						# validation loss, accuracy for all tasks till current task
 		val_loss = [[] for _ in range(t + 1)]
@@ -297,6 +309,41 @@ class HyperparameterTuner(object):
 		# training loop
 		while (True):
 			# single step of training
+
+			if (i == 0):
+				cur_iter_weighted_avg = 0.0 							# weighted averaged of validation accuracy
+				cur_iter_weights_sum = 0
+				# get validation accuracy for all tasks till 't'
+				accuracy = self.validationAccuracy(t, VALIDATION_BATCH_SIZE, restore_model=False, get_loss=True)
+				# calculating weighted average of accuracy
+				for j in range(t + 1):
+					val_loss[j].append(accuracy[0][j])
+					val_acc[j].append(accuracy[1][j])
+					cur_iter_weighted_avg += accuracy[1][j] * self.task_weights[j]
+					cur_iter_weights_sum += self.task_weights[j]
+				cur_iter_weighted_avg /= cur_iter_weights_sum
+
+				# if accuracy of current task > (max. accuracy) / 2, then start counting non-improving updates
+				if (val_acc[-1][-1] > np.max(np.array(val_acc)[:, -1]) / 2 and cur_best_avg >= cur_iter_weighted_avg):
+					count_not_improving += 1
+				else:
+					count_not_improving = 0
+
+				# store update number at which validation accuracy is maximum
+				if (cur_iter_weighted_avg > cur_best_avg):
+					cur_best_avg = cur_iter_weighted_avg
+					cur_best_avg_num_epoch = epoch
+
+				# stop training if validation accuracy not improving for self.num_tolerate_epochs epochs
+				if (count_not_improving * self.eval_frequency >= self.num_tolerate_epochs):
+					if (num_updates == -1):
+						break
+
+				print("epoch: %d, iter: %d/%d, validation accuracies: %s, average train loss: %f, average train accuracy: %f" % 
+						(epoch, i - epoch * updates_per_epoch, updates_per_epoch,
+						str(np.array(val_acc)[:, -1]), 
+						np.mean(loss[i - updates_per_epoch : ]), np.mean(train_acc[i - updates_per_epoch : ])))
+
 			batch_xs, batch_ys, batch_weights, batch_final_outputs = dataset_train.nextBatchSample(self.sess, random_crop=random_crop_flip, random_flip=random_crop_flip, epsilon=hparams['epsilon'])
 			if (self.tuner_hparams['mask_softmax']):
 				batch_ys = batch_ys[:, self.active_outputs]
@@ -363,11 +410,21 @@ class HyperparameterTuner(object):
 						(epoch, i - epoch * updates_per_epoch, updates_per_epoch,
 						loss[-1], train_acc[-1]))
 
+			if (self.is_write_tensorboard and i % updates_per_epoch == 0):
+				feed_dict = self.classifier.createFeedDict(self.task_list[0].validation.images, self.task_list[0].validation.labels);
+				layer_output = self.classifier.getLayerOutput(self.sess, feed_dict, -2);
+				writer.add_embedding(layer_output, 
+										metadata=np.argmax(self.task_list[0].validation.labels, axis=1), 
+										global_step=epoch);
+
 			# break if num_updates is specified ; break at nearest epoch which requires updates >= num_updates
 			if (num_updates >= 0 and (epoch >= math.ceil(num_updates / updates_per_epoch))):
 				break
 				
 		total_updates = i
+
+		if (self.is_write_tensorboard):
+			writer.close();
 
 		print("epochs: %f, final train loss: %f, validation accuracies: %s" % (epoch, loss[-1], str(np.array(val_acc)[:, -1])))
 		print("best epochs: %f, best_avg: %f, validation accuracies: %s" % 
@@ -736,17 +793,39 @@ class HyperparameterTuner(object):
 
 				hparams = self.hparams_list[i][k]
 
+				if (self.is_write_tensorboard):
+					model_name = self.fileName(i, hparams, self.tuner_hparams)
+					self.tensorboardX_writer = None
+					self.tensorboardX_writer = writer = tensorboardX.SummaryWriter(log_dir= self.summaries_path + 'tensorboardX/' + model_name)
+					fc_wt = self.sess.run([v for v in tf.all_variables() if 'dense' in v.name and 'kernel:0' in v.name])
+					writer.add_embedding(fc_wt[0][:, self.split[0]].T, 
+										metadata=self.split[0], 
+										tag='weights-init');
+
 				if (i > 0 and ('T' in self.hparams_list[i][0].keys())):
-					self.appended_task_list[i].loadFinalOutput(self.getAllLayerOutput(i, batch_size, -1)[0][:, list(np.sort(self.cumulative_split[i - 1]))])
+					self.appended_task_list[i].loadFinalOutput(self.getAllLayerOutput(i, batch_size, -1)[0][:, self.cumulative_split[i - 1]])
 
 				cur_result = self.train(i, hparams, batch_size, model_init_name, num_updates=num_updates, verbose=verbose, 
 										random_crop_flip=random_crop_flip)
 				
+				if (self.is_write_tensorboard):
+					fc_wt = self.sess.run([v for v in tf.all_variables() if 'dense' in v.name and 'kernel:0' in v.name])
+					writer.add_embedding(fc_wt[0][:, self.split[0]].T, 
+										metadata=self.split[0], 
+										tag='weights-before_bf');
+
 				cur_result_1 = None
 				if (do_bf_finetuning):
 					cur_result_1 = self.train(i, hparams, batch_size, model_init_name, num_updates=num_updates_bf, verbose=verbose, 
 												random_crop_flip=random_crop_flip, 
 												is_bf_finetuning_phase=True, only_penultimate_train=bf_only_penultimate_train)
+
+				if (self.is_write_tensorboard):
+					fc_wt = self.sess.run([v for v in tf.all_variables() if 'dense' in v.name and 'kernel:0' in v.name])
+					writer.add_embedding(fc_wt[0][:, self.split[0]].T, 
+										metadata=self.split[0], 
+										tag='weights-after_bf');
+					writer.close();
 
 				cur_result = (cur_result, cur_result_1)
 				if (not early_stop):
@@ -858,9 +937,14 @@ class HyperparameterTuner(object):
 
 
 	# validation loss, accuracy till task 't'
-	def validationAccuracy(self, t, batch_size, restore_model=True, get_loss=False):
+	def validationAccuracy(self, t, batch_size, restore_model=True, get_loss=False, hparams=None):
+		count_new_class = 0
+		temp_eval = False
 		if restore_model:
-			self.classifier.restoreModel(self.sess, self.best_hparams[t][-1])
+			if (hparams is None):
+				self.classifier.restoreModel(self.sess, self.best_hparams[t][-1])
+			else:
+				self.classifier.restoreModel(self.sess, self.fileName(t, hparams, self.tuner_hparams))
 
 		if (self.tuner_hparams['mask_softmax']):
 			self.setScoresMask(t)
@@ -877,6 +961,11 @@ class HyperparameterTuner(object):
 				if (self.tuner_hparams['mask_softmax']):
 					batch_ys = batch_ys[:, self.active_outputs]
 				feed_dict = self.classifier.createFeedDict(batch_xs, batch_ys, is_training=False)
+				
+				if (temp_eval):
+					cur_temp_output = self.classifier.getLayerOutput(self.sess, feed_dict, -1)
+					count_new_class += np.sum(np.argmax(cur_temp_output, axis=1) == self.split[1][0])
+				
 				eval_result = self.classifier.evaluate(self.sess, feed_dict)
 				cur_loss += eval_result[0] * batch_xs.shape[0]
 				cur_accuracy += eval_result[1] * batch_xs.shape[0]
@@ -884,6 +973,10 @@ class HyperparameterTuner(object):
 			cur_accuracy /= self.task_list[i].validation.images.shape[0]
 			accuracy[i] = cur_accuracy
 			loss[i] = cur_loss
+
+		if (temp_eval):
+			print("count new class:", count_new_class)
+
 		if (get_loss):
 			return loss, accuracy
 		else:

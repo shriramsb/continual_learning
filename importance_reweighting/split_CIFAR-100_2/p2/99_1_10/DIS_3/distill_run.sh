@@ -1,7 +1,7 @@
-old_new=20.0
+old_new=5.0
 epsilons=(0.5 1.0)
 sigma=10.0
-num_repeat_expt=1
+num_repeat_expt=3
 T=5.0
 alpha=0.2
 

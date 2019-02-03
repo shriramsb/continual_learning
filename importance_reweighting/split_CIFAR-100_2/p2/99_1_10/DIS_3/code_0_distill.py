@@ -47,7 +47,7 @@ if use_gpu:
 
 
 if use_gpu:
-    os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+    os.environ['CUDA_VISIBLE_DEVICES'] = '2'
     config = tf.ConfigProto()
     config.gpu_options.allow_growth = True
 
@@ -288,7 +288,7 @@ for i in range(0, t + 1):
 
 
 t = 10
-learning_rates = [(((45, 1e-1), (55, 1e-1 / 5), 1e-1 / 25), ((9, 1e-2), 1e-2 / 5))]
+learning_rates = [(((20, 1e-1), (30, 1e-1 / 5), 1e-1 / 25), ((20, 1e-2), 1e-2 / 5))]
 momentums = [0.9]
 regs = [0.00001]
 dropout_input_probs = [1.0]
@@ -331,9 +331,9 @@ for i in range(0, 1):
 
 
 num_hparams = len(hparams)
-num_epochs = 60
+num_epochs = 40
 num_updates = math.ceil(tuner.task_list[t].train.images.shape[0] / BATCH_SIZE) * num_epochs
-num_epochs_bf = 10
+num_epochs_bf = 30
 num_updates_bf = math.ceil(tuner.task_list[t].train.images.shape[0] / BATCH_SIZE) * num_epochs_bf
 
 
