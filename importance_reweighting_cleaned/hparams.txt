@@ -1,0 +1,59 @@
+network:
+	to be provided by user: same for all tasks
+		use_relu_last : if ReLU should be added after last classification layer
+		cosine_classifier : if classifier should take cosine similarity between features output by feature extractor and classification weights
+		scale_scores_init : initial value for the variable scaling the scores, if cosine classifier is used
+		mask_softmax : whether to mask softmax to include only outputs of current task
+		reg_type : type of regularization to use (l1 or l2)
+	
+	provided by classifier:
+		dropout : placeholder - (dropout input, dropout hidden)
+		output_shape : shape of output; specifically, number of classes
+		is_training : placeholder indicating if it is training phase; for batchnorm, since it behaves differently during training and testing
+
+classifier:
+	to be provided by user: can change for each task; it is a list of dictionaries
+		reweigh_points_loss : if loss corresponding to each point should be divided by the probability of sampling that point
+		momentum : momentum in MomentumOptimizer
+		reg : regularization weight; final_loss = 1 / (num points) * sum(loss for each point) + reg / 2 * sum(weights ** 2)
+		learning_rate : of the form (((epoch1, lr1), (epoch2, lr2), ..., (epoch(n-1), lr(n-1)), lr(n)), ((epoch1, lr1), (epoch2, lr2), ..., (epoch(n-1), lr(n-1)), lr(n))), where first part is for normal phase and second part for balanced finetuning phase (this part can be empty)
+		dropout_prob : probabilities of dropout in the format (input probability, hidden probability)
+		T : temperature for distillation
+		alpha : trade-off between distillation loss and cross-entropy loss
+		only_penultimate_train : if required to train only penultimate layer during balanced finetuning phase
+		loss_type : possible values - 'svm', 'cross-entropy'
+
+training:
+	to be provided by user: same for all tasks
+		epochs :
+		epochs_bf : 
+		start : start task 
+		end : end task; Network is trained on tasks in [start, end]
+		batch_size : 
+
+dataset:
+	to be provided by user: same for all tasks
+		epsilon : probability of doing selective sampling vs uniform sampling
+		sigma : the multiplier in softmax used to find probability of sampling each point
+		save_penultimate_output : whether to save penultimate layer output after finishing each task
+		use_gpu : whether to use gpu for finding similarity
+		old:new : ratio of old to new examples 
+		random_crop_flip : if data augmentation is required (randomly flipping horizontally and adding padding of 4 on each side of image and cropping to original size randomly)
+		equal_weights : 
+		data_path : path to dataset
+		dataset_name : name of dataset; available : cifar-100
+		label_shuffle_seed : numpy seed to use to shuffle labels list
+		class_per_split : number of classes per each split; python list
+		task_weights : weight of each task to be given to calculate weighted mean accuracy
+		percent_validation : percentage of training dataset to be used for validation
+
+
+logging:
+	to be provided by user: same for all tasks
+		checkpoints_path :
+		summaries_path : 
+		is_write_tensorboard : 
+		verbose : 
+		print_every : stats are printed once every print_every updates
+
+		eval_test_dataset : should evaluation be done on test dataset after end of each training of task in trainTasksInRange
